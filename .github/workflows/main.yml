@@ -10,6 +10,11 @@ env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: cjk-token-reducer
 
+# Prevent concurrent nightly releases from racing
+concurrency:
+  group: "nightly-release-${{ github.ref }}"
+  cancel-in-progress: true
+
 jobs:
   # Verification stage: build, test, lint
   verify:
@@ -125,8 +130,7 @@ jobs:
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "date=$DATE" >> $GITHUB_OUTPUT
         echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
-        echo "release_tag=v${VERSION}-${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
-        echo "Version: $VERSION, Date: $DATE, Tag: v${VERSION}-${DATE}-${SHORT_SHA}"
+        echo "Version: $VERSION, Date: $DATE, Commit: $SHORT_SHA"
 
     - name: Create checksums
       run: |
@@ -134,17 +138,22 @@ jobs:
         sha256sum * > checksums-sha256.txt
         cat checksums-sha256.txt
 
-    - name: Create versioned pre-release
+    - name: Update nightly tag
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git tag -f nightly ${{ github.sha }}
+        git push origin nightly -f
+
+    - name: Update nightly pre-release
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        gh release create ${{ steps.meta.outputs.release_tag }} \
-          --prerelease \
-          --title "Build v${{ steps.meta.outputs.version }} (${{ steps.meta.outputs.date }}-${{ steps.meta.outputs.short_sha }})" \
-          --notes "Automated pre-release build from main branch.
+        NIGHTLY_TAG="nightly"
+        RELEASE_NOTES="Rolling pre-release build from main branch.
 
         **Version:** ${{ steps.meta.outputs.version }}
-        **Commit:** ${{ github.sha }}
+        **Commit:** \`${{ steps.meta.outputs.short_sha }}\`
         **Built:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
         ## Binaries
@@ -154,12 +163,33 @@ jobs:
         ## Installation
         \`\`\`bash
         # Linux x86_64
-        curl -Lo cjk-token-reducer https://github.com/${{ github.repository }}/releases/download/${{ steps.meta.outputs.release_tag }}/cjk-token-reducer-linux-x86_64
+        curl -Lo cjk-token-reducer https://github.com/${{ github.repository }}/releases/download/nightly/cjk-token-reducer-linux-x86_64
         chmod +x cjk-token-reducer
 
         # macOS Apple Silicon
-        curl -Lo cjk-token-reducer https://github.com/${{ github.repository }}/releases/download/${{ steps.meta.outputs.release_tag }}/cjk-token-reducer-macos-aarch64
+        curl -Lo cjk-token-reducer https://github.com/${{ github.repository }}/releases/download/nightly/cjk-token-reducer-macos-aarch64
         chmod +x cjk-token-reducer
         \`\`\`
-        " \
-          artifacts/*
+
+        ## Verification
+        \`\`\`bash
+        sha256sum -c checksums-sha256.txt
+        \`\`\`
+        "
+
+        # Create release if it doesn't exist (first run only)
+        if ! gh release view "$NIGHTLY_TAG" &>/dev/null; then
+          echo "Creating nightly release..."
+          gh release create "$NIGHTLY_TAG" --prerelease --title "Nightly" --notes "Initializing..."
+        fi
+
+        # Upload artifacts and checksums, replacing any existing assets
+        echo "Uploading artifacts..."
+        gh release upload "$NIGHTLY_TAG" artifacts/* --clobber
+
+        # Update release metadata
+        echo "Updating release metadata..."
+        gh release edit "$NIGHTLY_TAG" \
+          --prerelease \
+          --title "Nightly (${{ steps.meta.outputs.date }}-${{ steps.meta.outputs.short_sha }})" \
+          --notes "$RELEASE_NOTES"
