@@ -91,7 +91,17 @@ cargo build --release
 # macOS (with NLP support)
 cargo build --release --features macos-nlp
 
+# Install (builds if needed, installs binary, configures Claude hook)
+make install
+
+# Uninstall (removes binary and hook)
+make uninstall
+```
+
+If you prefer manual installation:
+```shell
 cp target/release/cjk-token-reducer ~/.local/bin/
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 ## Setup
