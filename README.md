@@ -41,6 +41,8 @@ English is the "native language" of LLM tokenizers, so translation acts as a com
 ### Key Features
 - Reduces input token count by 35-50% (up to 2x effective context window)
 - Preserves code blocks, file paths, and URLs (not sent for translation)
+- Auto-detects English technical terms (camelCase, PascalCase, SCREAMING_SNAKE_CASE)
+- macOS: Uses Apple NaturalLanguage framework for intelligent named entity recognition
 - Caches translations locally to eliminate redundant API calls
 - Uses free Google Translate API (no API key required)
 - Sends only prompt text for translation; code artifacts stay local
@@ -71,14 +73,24 @@ Mitigation strategies:
 
 ### Option 1: Cargo Install (Recommended)
 ```shell
+# Linux/Windows
 cargo install --git https://github.com/jserv/cjk-token-reducer
+
+# macOS (with NLP support)
+cargo install --git https://github.com/jserv/cjk-token-reducer --features macos-nlp
 ```
 
 ### Option 2: Build from Source
 ```shell
 git clone https://github.com/jserv/cjk-token-reducer
 cd cjk-token-reducer
+
+# Linux/Windows
 cargo build --release
+
+# macOS (with NLP support)
+cargo build --release --features macos-nlp
+
 cp target/release/cjk-token-reducer ~/.local/bin/
 ```
 
@@ -164,6 +176,10 @@ The tool searches these locations in order:
     "enabled": true,
     "ttlDays": 30,
     "maxSizeMb": 10
+  },
+  "preserve": {
+    "englishTerms": true,
+    "useNlp": true
   }
 }
 ```
@@ -177,6 +193,8 @@ The tool searches these locations in order:
 | `cache.enabled` | boolean | `true` | Enable translation caching to reduce API calls. |
 | `cache.ttlDays` | number | `30` | Cache entry time-to-live in days. |
 | `cache.maxSizeMb` | number | `10` | Maximum cache size in megabytes. |
+| `preserve.englishTerms` | boolean | `true` | Auto-detect and preserve English technical terms in CJK text. |
+| `preserve.useNlp` | boolean | `true` | Use macOS NLP for named entity detection (macOS only, falls back to regex). |
 
 #### Data Storage Locations
 The tool stores translation cache and statistics in platform-specific directories:
@@ -196,6 +214,40 @@ Files within these directories:
   This yields maximum token savings for both input and output.
 - `"zh"`, `"ja"`, `"ko"`: Instructs Claude to reply in the specified language.
   Saves input tokens, but output remains in CJK and consumes more tokens than English output.
+
+#### Platform-Specific Features
+
+**macOS NLP Integration**
+
+On macOS, the tool leverages Apple's NaturalLanguage framework for intelligent named entity recognition.
+This provides ML-based detection of:
+
+| Entity Type | Examples | Benefit |
+|-------------|----------|---------|
+| Personal Names | Tim Cook, Elon Musk, Satya Nadella | Preserved without translation corruption |
+| Place Names | Silicon Valley, Tokyo, Seoul | Geographic terms stay intact |
+| Organization Names | Apple, Microsoft, Google | Company names remain recognizable |
+
+The NLP detector also supports extended Latin characters (e.g., "Rene", "Munchen", "Francois")
+while correctly filtering out CJK names that should be translated.
+
+**Comparison: NLP vs Regex Detection**
+
+| Aspect | Regex (All Platforms) | NLP (macOS) |
+|--------|----------------------|-------------|
+| Technical Terms | camelCase, PascalCase, SNAKE_CASE | Same + named entities |
+| Proper Names | Only if capitalized patterns match | ML-based recognition |
+| Context Awareness | Pattern-based only | Semantic understanding |
+| Performance | Faster | ~10-50ms overhead per call |
+
+To disable NLP and use regex-only detection on macOS:
+```json
+{
+  "preserve": {
+    "useNlp": false
+  }
+}
+```
 
 ## Usage
 Once installed and configured, use Claude Code normally.
@@ -257,14 +309,20 @@ Output example:
 
 ## Development
 ```shell
-# Build
+# Build (Linux/Windows)
 cargo build
+
+# Build with NLP support (macOS only)
+cargo build --features macos-nlp
 
 # Run tests
 cargo test
 
-# Build for release
-cargo build --release
+# Run tests with NLP (macOS only)
+cargo test --features macos-nlp
+
+# Build for release (macOS with NLP)
+cargo build --release --features macos-nlp
 ```
 
 ## Alternatives
