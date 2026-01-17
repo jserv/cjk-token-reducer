@@ -1043,4 +1043,79 @@ mod tests {
         assert_eq!(no_trans.len(), 1);
         assert_eq!(eng_terms.len(), 0);
     }
+
+    #[test]
+    fn test_extract_preserve_restore_roundtrip_simple() {
+        let text = "이 함수 `foo()`를 호출하세요";
+        let preserved = extract_and_preserve(text);
+        let restored = restore_preserved(&preserved.text, &preserved.segments);
+
+        assert_eq!(restored, text);
+    }
+
+    #[test]
+    fn test_extract_preserve_restore_roundtrip_complex() {
+        let text = "이 코드 수정해줘\n```rust\nfn main() {}\n```\nAPI_KEY 환경변수 필요";
+        let preserved = extract_and_preserve(text);
+        let restored = restore_preserved(&preserved.text, &preserved.segments);
+
+        assert_eq!(restored, text);
+    }
+
+    #[test]
+    fn test_extract_preserve_restore_roundtrip_all_types() {
+        // Wiki markers [[...]] are intentionally stripped during extraction (capture group)
+        // The expected output keeps the inner content but removes the markers
+        let text = "[[keep]] `code` getUserData API ./src/main.rs https://example.com";
+        let expected = "keep `code` getUserData API ./src/main.rs https://example.com";
+        let config = PreserveConfig::all();
+        let preserved = extract_and_preserve_with_config(text, &config);
+        let restored = restore_preserved(&preserved.text, &preserved.segments);
+
+        assert_eq!(restored, expected);
+    }
+
+    #[test]
+    fn test_extract_preserve_empty_text() {
+        let text = "";
+        let preserved = extract_and_preserve(text);
+
+        assert_eq!(preserved.text, "");
+        assert!(preserved.segments.is_empty());
+    }
+
+    #[test]
+    fn test_extract_preserve_no_segments() {
+        let text = "이 텍스트는 보호할 세그먼트가 없습니다";
+        let preserved = extract_and_preserve(text);
+
+        // No segments should be extracted
+        assert!(preserved.segments.is_empty());
+        assert_eq!(preserved.text, text);
+    }
+
+    #[test]
+    fn test_regex_term_detector_filters_placeholders() {
+        // Ensure regex detector doesn't match placeholder text itself
+        let text = "\u{FEFF}cjkengterm0\u{FEFF} should not be matched";
+        let detector = RegexTermDetector;
+        let matches = detector.detect(text);
+
+        // Should not match the placeholder
+        assert!(!matches.iter().any(|m| m.text.contains("cjkengterm")));
+    }
+
+    #[test]
+    fn test_term_match_properties() {
+        let text = "getUserData 함수";
+        let detector = RegexTermDetector;
+        let matches = detector.detect(text);
+
+        assert!(!matches.is_empty());
+        let term = &matches[0];
+        assert_eq!(term.text, "getUserData");
+        assert_eq!(term.start, 0);
+        // End position should be after "getUserData"
+        assert!(term.end > 0);
+    }
 }

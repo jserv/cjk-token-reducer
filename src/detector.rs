@@ -125,4 +125,68 @@ mod tests {
         let result = detect_language("function foo() { } // 이 함수는 버그가 있음");
         assert!(result.ratio > 0.1);
     }
+
+    #[test]
+    fn test_language_priority_chinese_over_english() {
+        // Chinese should be detected even with English characters
+        let result = detect_language("這個function需要refactor");
+        assert_eq!(result.language, Language::Chinese);
+        // Just verify Chinese is detected (ratio depends on specific character counts)
+        assert!(result.ratio > 0.0);
+    }
+
+    #[test]
+    fn test_language_priority_japanese_with_kanji() {
+        // Japanese with Kanji should prioritize Japanese over Chinese
+        let result = detect_language("この関数をリファクタリングしてください");
+        assert_eq!(result.language, Language::Japanese);
+        assert!(result.ratio > 0.5);
+    }
+
+    #[test]
+    fn test_language_priority_japanese_mixed() {
+        // Japanese with Kanji + Kana - should still be Japanese
+        let result = detect_language("漢字とひらがな");
+        assert_eq!(result.language, Language::Japanese);
+    }
+
+    #[test]
+    fn test_language_priority_korean() {
+        // Pure Korean should be detected
+        let result = detect_language("이 함수를 수정해주세요");
+        assert_eq!(result.language, Language::Korean);
+        assert!(result.ratio > 0.8);
+    }
+
+    #[test]
+    fn test_empty_string() {
+        let result = detect_language("");
+        assert_eq!(result.language, Language::English);
+        assert_eq!(result.ratio, 0.0);
+    }
+
+    #[test]
+    fn test_whitespace_only() {
+        let result = detect_language("   \n\t  ");
+        assert_eq!(result.language, Language::English);
+        assert_eq!(result.ratio, 0.0);
+    }
+
+    #[test]
+    fn test_japanese_weighting() {
+        // Japanese text typically mixes Kanji (Chinese range) with Kana
+        // The detector should weight Japanese higher via Kana detection
+        let japanese = "こんにちは世界"; // Has 3 Hiragana + 2 Chinese chars
+        let result = detect_language(japanese);
+        // Should be Japanese due to Hiragana presence
+        assert_eq!(result.language, Language::Japanese);
+    }
+
+    #[test]
+    fn test_minimal_cjk_threshold() {
+        // Very low CJK content should still detect the language
+        let result = detect_language("hello 世界");
+        assert!(result.ratio > 0.0);
+        assert!(result.ratio < 1.0);
+    }
 }

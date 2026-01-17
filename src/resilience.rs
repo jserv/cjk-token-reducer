@@ -333,12 +333,39 @@ impl Default for RateLimiter {
     }
 }
 
-/// Get current timestamp in seconds (for circuit breaker)
+/// Time source abstraction for testing
+///
+/// In production, uses system time. In tests, can be overridden via
+/// thread-local `MOCK_TIME_SECS` for deterministic behavior without sleeps.
+/// Thread-local storage ensures parallel tests don't interfere with each other.
+#[cfg(not(test))]
 fn current_timestamp_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+fn current_timestamp_secs() -> u64 {
+    MOCK_TIME_SECS.with(|cell| {
+        let mock_time = cell.get();
+        if mock_time > 0 {
+            mock_time
+        } else {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        }
+    })
+}
+
+/// Thread-local mock time in seconds (0 = use real time)
+/// Using thread-local ensures parallel tests don't interfere with each other.
+#[cfg(test)]
+thread_local! {
+    static MOCK_TIME_SECS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Get current timestamp in milliseconds (for rate limiter)
@@ -352,6 +379,41 @@ fn current_timestamp_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RAII guard for mock time that automatically resets on drop.
+    /// This prevents mock time leakage even if a test panics.
+    struct MockTimeGuard {
+        _private: (), // Prevent direct construction
+    }
+
+    impl MockTimeGuard {
+        /// Create a new mock time guard and set the initial time.
+        fn new(secs: u64) -> Self {
+            MOCK_TIME_SECS.with(|cell| cell.set(secs));
+            Self { _private: () }
+        }
+
+        /// Advance mock time by specified seconds.
+        #[allow(dead_code)]
+        fn advance(&self, secs: u64) {
+            MOCK_TIME_SECS.with(|cell| {
+                let current = cell.get();
+                cell.set(current + secs);
+            });
+        }
+
+        /// Set mock time to a specific value.
+        fn set(&self, secs: u64) {
+            MOCK_TIME_SECS.with(|cell| cell.set(secs));
+        }
+    }
+
+    impl Drop for MockTimeGuard {
+        fn drop(&mut self) {
+            // Reset mock time to 0 (use real time) when guard is dropped
+            MOCK_TIME_SECS.with(|cell| cell.set(0));
+        }
+    }
 
     #[test]
     fn test_circuit_breaker_starts_closed() {
@@ -461,5 +523,115 @@ mod tests {
         cb.reset();
         assert_eq!(cb.state(), CircuitState::Closed);
         assert!(cb.allow_request());
+    }
+
+    #[test]
+    fn test_circuit_breaker_half_open_transition() {
+        // RAII guard ensures mock time is reset even on panic
+        let base_time = 1000u64;
+        let mock_time = MockTimeGuard::new(base_time);
+
+        let cb = CircuitBreaker::with_params(3, 5); // 5 second timeout
+
+        // Open the circuit
+        cb.record_failure();
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+        assert!(!cb.allow_request());
+
+        // Advance time past timeout
+        mock_time.set(base_time + 6);
+
+        // Should now be HalfOpen
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+
+        // One request should be allowed
+        assert!(cb.allow_request());
+
+        // But subsequent requests should be blocked until success or timeout expires again
+        assert!(!cb.allow_request());
+        // Guard automatically resets mock time on drop
+    }
+
+    #[test]
+    fn test_circuit_breaker_recovery() {
+        // RAII guard ensures mock time is reset even on panic
+        let base_time = 2000u64;
+        let mock_time = MockTimeGuard::new(base_time);
+
+        let cb = CircuitBreaker::with_params(2, 5);
+
+        // Open circuit
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // Advance time past timeout
+        mock_time.set(base_time + 6);
+
+        // Allow request in HalfOpen state
+        assert!(cb.allow_request());
+
+        // Record success - should close circuit
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::Closed);
+        assert!(cb.allow_request());
+
+        // Should have recovery count
+        let stats = cb.stats();
+        assert_eq!(stats.recoveries, 1);
+        // Guard automatically resets mock time on drop
+    }
+
+    #[test]
+    fn test_circuit_breaker_does_not_extend_open_window() {
+        // RAII guard ensures mock time is reset even on panic
+        let base_time = 3000u64;
+        let mock_time = MockTimeGuard::new(base_time);
+
+        let cb = CircuitBreaker::with_params(2, 10);
+
+        // Open circuit
+        cb.record_failure();
+        cb.record_failure();
+        let opened_time = cb.opened_at.load(Ordering::Acquire);
+        assert_ne!(opened_time, 0);
+
+        // Advance time by 5 seconds (still within timeout)
+        mock_time.set(base_time + 5);
+
+        // Record more failures - should NOT extend the open window
+        cb.record_failure();
+        cb.record_failure();
+        let new_opened_time = cb.opened_at.load(Ordering::Acquire);
+
+        // Open time should remain the same (not extended)
+        assert_eq!(opened_time, new_opened_time);
+        // Guard automatically resets mock time on drop
+    }
+
+    #[test]
+    fn test_circuit_breaker_stats_display() {
+        let cb = CircuitBreaker::with_params(5, 60);
+        cb.record_failure();
+        cb.record_failure();
+
+        let stats = cb.stats();
+        let display = format!("{}", stats);
+        assert!(display.contains("Circuit"));
+        assert!(display.contains("failures"));
+    }
+
+    #[test]
+    fn test_rate_limiter_hit_count() {
+        let rl = RateLimiter::new();
+        assert_eq!(rl.rate_limit_hits(), 0);
+
+        rl.record_rate_limit(None);
+        rl.record_rate_limit(None);
+        rl.record_rate_limit(None);
+
+        assert_eq!(rl.rate_limit_hits(), 3);
     }
 }
