@@ -134,6 +134,28 @@ mod cache_impl {
             })
         }
 
+        /// Open cache at a specific path (for testing)
+        ///
+        /// This avoids modifying global environment variables which causes
+        /// thread-safety issues in parallel test execution.
+        #[cfg(test)]
+        pub fn open_at_path(config: &CacheConfig, path: &std::path::Path) -> Result<Self> {
+            // Ensure parent directory exists
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    TokenSaverError::Cache(format!("Failed to create cache dir: {e}"))
+                })?;
+            }
+
+            let db = sled::open(path)
+                .map_err(|e| TokenSaverError::Cache(format!("Failed to open cache: {e}")))?;
+
+            Ok(Self {
+                db,
+                config: config.clone(),
+            })
+        }
+
         /// Generate cache key from translation parameters
         ///
         /// Key format: SHA-256 of "{source_lang}:{target_lang}:{text}"
@@ -309,6 +331,7 @@ pub use cache_impl::TranslationCache;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_hit_rate_calculation() {
@@ -330,6 +353,21 @@ mod tests {
             session_misses: 0,
         };
         assert_eq!(stats.hit_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_format_cache_stats() {
+        let stats = CacheStats {
+            entries: 100,
+            size_bytes: 2 * 1024 * 1024, // 2 MB
+            session_hits: 80,
+            session_misses: 20,
+        };
+        let output = format_cache_stats(&stats);
+        assert!(output.contains("Entries:"));
+        assert!(output.contains("2.00 MB"));
+        assert!(output.contains("Hit Rate:"));
+        assert!(output.contains("80.0%"));
     }
 
     #[cfg(feature = "cache")]
@@ -378,8 +416,84 @@ mod tests {
     #[test]
     fn test_large_entry_threshold() {
         use cache_impl::TEST_LARGE_ENTRY_THRESHOLD;
+        // Verify constant is set to 4096 (4KB)
         assert_eq!(TEST_LARGE_ENTRY_THRESHOLD, 4096);
-        assert!(4097 > TEST_LARGE_ENTRY_THRESHOLD);
-        assert!(!(4096 > TEST_LARGE_ENTRY_THRESHOLD));
+        // Entries > 4096 bytes are considered large (tested in cache eviction logic)
+    }
+
+    #[cfg(feature = "cache")]
+    #[test]
+    fn test_cache_operations() {
+        use crate::config::CacheConfig;
+        use chrono::Utc;
+
+        // Create a temporary directory for the test cache
+        let temp_dir = TempDir::new().unwrap();
+        let cache_path = temp_dir.path().join("test_cache.db");
+
+        let config = CacheConfig {
+            enabled: true,
+            ttl_days: 30,
+            max_size_mb: 10,
+        };
+
+        // Open cache at specific path (avoids modifying HOME env var)
+        let cache = TranslationCache::open_at_path(&config, &cache_path).unwrap();
+
+        // Test putting and getting an entry
+        let key = TranslationCache::make_key("zh", "en", "你好");
+        let entry = CacheEntry {
+            translated: "Hello".to_string(),
+            timestamp: Utc::now().timestamp(),
+            source_lang: "zh".to_string(),
+            target_lang: "en".to_string(),
+        };
+
+        cache.put(&key, &entry);
+        let retrieved = cache.get(&key);
+
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().translated, "Hello");
+
+        // Test cache stats
+        let stats = cache.stats();
+        assert_eq!(stats.entries, 1);
+
+        // Clean up (temp_dir auto-deletes on drop)
+        cache.clear().unwrap();
+    }
+
+    #[cfg(not(feature = "cache"))]
+    #[test]
+    fn test_stub_cache_operations() {
+        use crate::config::CacheConfig;
+
+        let config = CacheConfig {
+            enabled: true,
+            ttl_days: 30,
+            max_size_mb: 10,
+        };
+
+        // Open stub cache
+        let cache = TranslationCache::open(&config).unwrap();
+
+        // Test putting and getting an entry (should always miss with stub)
+        let key = TranslationCache::make_key("zh", "en", "你好");
+        let entry = CacheEntry {
+            translated: "Hello".to_string(),
+            timestamp: 0,
+            source_lang: "zh".to_string(),
+            target_lang: "en".to_string(),
+        };
+
+        cache.put(&key, &entry);
+        let retrieved = cache.get(&key);
+
+        // Stub implementation always returns None
+        assert!(retrieved.is_none());
+
+        // Stats should be default
+        let stats = cache.stats();
+        assert_eq!(stats.entries, 0);
     }
 }

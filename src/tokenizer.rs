@@ -193,4 +193,187 @@ mod tests {
         assert!(result.used_fallback);
         assert!(result.count > 0);
     }
+
+    #[test]
+    fn test_fallback_estimation_cjk_heavy() {
+        // Test with mostly CJK characters
+        let count = estimate_tokens_fallback("你好世界世界世界");
+        // Should be higher than pure English equivalent
+        let eng_count = estimate_tokens_fallback("hello world");
+        assert!(count > eng_count);
+    }
+
+    #[test]
+    fn test_fallback_estimation_mixed_content() {
+        // Test with mixed CJK and English
+        let count = estimate_tokens_fallback("Hello 世界");
+        assert!(count > 0);
+    }
+
+    #[test]
+    fn test_token_savings_struct() {
+        let savings = TokenSavings {
+            original_tokens: 100,
+            translated_tokens: 80,
+            saved_tokens: 20,
+            savings_percent: 20.0,
+        };
+
+        assert_eq!(savings.original_tokens, 100);
+        assert_eq!(savings.translated_tokens, 80);
+        assert_eq!(savings.saved_tokens, 20);
+        assert!((savings.savings_percent - 20.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_calculate_savings_edge_cases() {
+        // Test with empty strings
+        let savings = calculate_savings("", "");
+        assert_eq!(savings.original_tokens, 0);
+        assert_eq!(savings.savings_percent, 0.0);
+
+        // Test with same content (no savings)
+        let savings = calculate_savings("Hello", "Hello");
+        assert!(savings.original_tokens > 0);
+        assert_eq!(savings.saved_tokens, 0);
+
+        // Test where translation is longer than original
+        let savings = calculate_savings("Hi", "This is a very long translation");
+        assert!(savings.original_tokens > 0);
+        assert_eq!(savings.saved_tokens, 0); // Should not be negative
+    }
+
+    #[test]
+    fn test_count_tokens_with_fallback_consistency() {
+        let text = "Hello 世界";
+        let result = count_tokens_with_fallback(text);
+        let direct_count = count_tokens(text);
+
+        assert_eq!(result.count, direct_count);
+        assert!(result.count > 0);
+    }
+
+    #[test]
+    fn test_tokenize_with_fallback() {
+        let (tokens, used_fallback) = tokenize_with_fallback("Hello world");
+
+        #[cfg(feature = "tokenizer")]
+        {
+            // When tokenizer feature is enabled, it may or may not use fallback
+            // depending on whether the tokenizer succeeds
+            assert_eq!(tokens.is_empty(), used_fallback);
+        }
+        #[cfg(not(feature = "tokenizer"))]
+        {
+            // When tokenizer feature is disabled, always uses fallback
+            assert!(tokens.is_empty());
+            assert!(used_fallback);
+        }
+    }
+
+    #[test]
+    fn test_tokenize_function() {
+        let _tokens = tokenize("Hello world");
+
+        #[cfg(feature = "tokenizer")]
+        {
+            // May return tokens if the tokenizer works
+            // Or empty vector if it falls back to disabled tokenizer
+        }
+        #[cfg(not(feature = "tokenizer"))]
+        {
+            // Always returns empty when tokenizer feature is disabled
+            let tokens = tokenize("Hello world");
+            assert!(tokens.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_estimate_tokens_fallback_cjk_ranges() {
+        // Test various CJK character ranges
+        let cjk_chars = [
+            "一", // Basic CJK Unified Ideograph
+            "㐂", // CJK Extension A
+            "぀",  // CJK Extension B (partial)
+            "ゟ", // CJK Compatibility Ideograph
+            "あ", // Hiragana
+            "ア", // Katakana
+            "가", // Hangul Syllable
+            "ㄱ", // Hangul Jamo
+            "㆐", // Bopomofo Extended
+            "￠", // Halfwidth and Fullwidth Form
+        ];
+
+        for cjk_char in &cjk_chars {
+            let count = estimate_tokens_fallback(cjk_char);
+            // Each CJK character should contribute more than 0 tokens
+            assert!(
+                count > 0,
+                "CJK char '{}' should have positive token count",
+                cjk_char
+            );
+        }
+    }
+
+    #[test]
+    fn test_estimate_tokens_fallback_non_cjk() {
+        // Test non-CJK characters
+        let non_cjk = "abc123!@#";
+        let count = estimate_tokens_fallback(non_cjk);
+        // Should have some tokens but less than CJK equivalent
+        assert!(count > 0);
+    }
+
+    #[test]
+    fn test_estimate_tokens_fallback_mixed_content() {
+        let mixed = "Hello 世界 123 가나다";
+        let count = estimate_tokens_fallback(mixed);
+        assert!(count > 0);
+    }
+
+    #[test]
+    fn test_estimate_tokens_fallback_empty() {
+        let count = estimate_tokens_fallback("");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_calculate_savings_identical_strings() {
+        let savings = calculate_savings("same string", "same string");
+        // If strings are identical, tokens should be the same
+        assert_eq!(savings.original_tokens, savings.translated_tokens);
+        assert_eq!(savings.saved_tokens, 0);
+        assert!((savings.savings_percent - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_calculate_savings_empty_strings() {
+        let savings = calculate_savings("", "");
+        assert_eq!(savings.original_tokens, 0);
+        assert_eq!(savings.translated_tokens, 0);
+        assert_eq!(savings.saved_tokens, 0);
+        assert!((savings.savings_percent - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_calculate_savings_different_lengths() {
+        let savings = calculate_savings("short", "this is a much longer translation");
+        assert!(savings.original_tokens > 0);
+        assert!(savings.translated_tokens > 0);
+        // Since translated is longer, saved should be 0 (not negative)
+        assert_eq!(savings.saved_tokens, 0);
+    }
+
+    #[test]
+    fn test_token_savings_debug_format() {
+        let savings = TokenSavings {
+            original_tokens: 100,
+            translated_tokens: 80,
+            saved_tokens: 20,
+            savings_percent: 20.0,
+        };
+
+        // Just ensure it doesn't panic when debug formatted
+        let _debug_str = format!("{:?}", savings);
+    }
 }

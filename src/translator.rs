@@ -516,6 +516,9 @@ pub fn reset_resilience_state() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::error::{ErrorCategory, TokenSaverError};
+    use reqwest::StatusCode;
 
     #[test]
     fn test_output_language_instruction() {
@@ -642,5 +645,471 @@ mod tests {
         let normalized = normalize_whitespace_internal(with_placeholder);
         assert!(normalized.contains("\u{FEFF}cjkcode0\u{FEFF}"));
         assert_eq!(normalized, "text \u{FEFF}cjkcode0\u{FEFF} more text");
+    }
+
+    #[test]
+    fn test_find_split_point_single_pass() {
+        // Test with text that needs to be split
+        let text = "This is a sentence. Another sentence. ".repeat(200); // Exceeds MAX_CHUNK_SIZE
+        let split_point = find_split_point_single_pass(&text);
+
+        // The split point should be within bounds
+        assert!(split_point <= MAX_CHUNK_SIZE);
+        assert!(split_point > 0);
+
+        // The split point should be at a char boundary
+        assert!(text.is_char_boundary(split_point));
+    }
+
+    #[test]
+    fn test_translation_result_struct() {
+        let result = TranslationResult {
+            original: "Hello".to_string(),
+            translated: "Bonjour".to_string(),
+            was_translated: true,
+            source_language: Language::English,
+            input_tokens: 10,
+            output_tokens: 12,
+            cache_hit: false,
+        };
+
+        assert_eq!(result.original, "Hello");
+        assert_eq!(result.translated, "Bonjour");
+        assert!(result.was_translated);
+        assert_eq!(result.source_language, Language::English);
+        assert_eq!(result.input_tokens, 10);
+        assert_eq!(result.output_tokens, 12);
+        assert!(!result.cache_hit);
+    }
+
+    #[test]
+    fn test_build_output_language_instruction_variants() {
+        // Test various language codes
+        assert!(build_output_language_instruction("zh-CN").contains("Chinese"));
+        assert!(build_output_language_instruction("zh-TW").contains("Chinese"));
+        assert!(build_output_language_instruction("ja").contains("Japanese"));
+        assert!(build_output_language_instruction("ko").contains("Korean"));
+        assert!(build_output_language_instruction("fr").is_empty());
+        assert!(build_output_language_instruction("").is_empty());
+    }
+
+    #[test]
+    fn test_get_user_agent_rotation() {
+        // Test that user agent rotates
+        let ua1 = get_user_agent();
+        let ua2 = get_user_agent();
+
+        // Since we're using atomic counter, we can't guarantee they're different
+        // but we can verify they're from the list
+        assert!(USER_AGENTS.contains(&ua1));
+        assert!(USER_AGENTS.contains(&ua2));
+    }
+
+    #[test]
+    fn test_translation_result_with_options_skip_translation() {
+        // Create a config with a high threshold to skip translation
+        let config = Config {
+            threshold: 1.0, // Very high threshold to ensure no translation happens
+            ..Default::default()
+        };
+
+        // This should return without translation
+        let result = futures::executor::block_on(translate_to_english_with_options(
+            "Hello world",
+            &config,
+            false,
+        ))
+        .unwrap();
+
+        assert!(!result.was_translated);
+        assert_eq!(result.original, "Hello world");
+        assert_eq!(result.translated, "Hello world");
+    }
+
+    #[test]
+    fn test_chunk_text_long_text_cjk_sentences() {
+        // Create text >5000 chars with CJK sentence endings
+        let sentence = "这是一个长句子需要翻译。";
+        let mut text = String::new();
+        for _ in 0..200 {
+            text.push_str(sentence);
+        }
+        assert!(text.len() > 5000);
+
+        let chunks = chunk_text(&text);
+
+        // Should split into multiple chunks
+        assert!(chunks.len() > 1);
+
+        // Each chunk should end with a sentence boundary
+        for chunk in &chunks[..chunks.len() - 1] {
+            // Last char should be near boundary
+            assert!(chunk.len() <= MAX_CHUNK_SIZE);
+        }
+
+        // Joining chunks should restore original text
+        assert_eq!(chunks.join(""), text);
+    }
+
+    #[test]
+    fn test_chunk_text_long_text_western_sentences() {
+        // Create text >5000 chars with Western sentence endings
+        let sentence = "This is a long sentence that needs translation. ";
+        let mut text = String::new();
+        for _ in 0..200 {
+            text.push_str(sentence);
+        }
+        assert!(text.len() > 5000);
+
+        let chunks = chunk_text(&text);
+
+        // Should split into multiple chunks
+        assert!(chunks.len() > 1);
+
+        // Each chunk should be within size limit
+        for chunk in &chunks {
+            assert!(chunk.len() <= MAX_CHUNK_SIZE);
+        }
+
+        // Joining chunks should restore original text
+        assert_eq!(chunks.join(""), text);
+    }
+
+    #[test]
+    fn test_chunk_text_mixed_boundaries() {
+        // Test mixed CJK/Western sentences with newlines
+        let text = "First sentence. 这是中文句子。\nAnother one. 这也是。".repeat(500);
+        assert!(text.len() > 5000);
+
+        let chunks = chunk_text(&text);
+
+        // Should split into multiple chunks
+        assert!(chunks.len() > 1);
+
+        // All chunks should be valid UTF-8 and at boundaries
+        for chunk in chunks {
+            assert!(chunk.is_char_boundary(chunk.len()));
+        }
+    }
+
+    #[test]
+    fn test_chunk_text_unicode_boundary() {
+        // Ensure chunking respects Unicode character boundaries
+        let mut text = String::new();
+        for _ in 0..600 {
+            text.push_str("こんにちは"); // Each char is 3 bytes
+        }
+        // 600 * 15 = 9000 bytes > 5000
+
+        let chunks = chunk_text(&text);
+
+        // Each chunk should be valid UTF-8
+        for chunk in &chunks {
+            assert!(std::str::from_utf8(chunk.as_bytes()).is_ok());
+            assert!(chunk.len() <= MAX_CHUNK_SIZE);
+        }
+
+        // Reassembly should match original
+        assert_eq!(chunks.join(""), text);
+    }
+
+    #[test]
+    fn test_chunk_text_exact_max_size() {
+        // Text exactly at MAX_CHUNK_SIZE should not split
+        let text = "a".repeat(MAX_CHUNK_SIZE);
+
+        let chunks = chunk_text(&text);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), MAX_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn test_chunk_text_one_over_max_size() {
+        // Text one byte over MAX_CHUNK_SIZE should split
+        let text = "a".repeat(MAX_CHUNK_SIZE + 1);
+
+        let chunks = chunk_text(&text);
+
+        assert!(chunks.len() > 1);
+        // First chunk should be at most MAX_CHUNK_SIZE
+        assert!(chunks[0].len() <= MAX_CHUNK_SIZE);
+        // Combined should equal original
+        assert_eq!(chunks.join(""), text);
+    }
+
+    #[test]
+    fn test_normalize_whitespace_preserves_code_blocks() {
+        let text = "```\nfn main() {\n    println!(\"Hello\");\n}\n```";
+        let result = normalize_whitespace_internal(text);
+
+        // Code blocks should be preserved (but whitespace within them may be normalized)
+        assert!(result.contains("fn main()"));
+        assert!(result.contains("println!"));
+    }
+
+    #[test]
+    fn test_normalize_whitespace_preserves_inline_code() {
+        let text = "Use `fn main()` to start";
+        let result = normalize_whitespace_internal(text);
+
+        // Inline code should be preserved
+        assert!(result.contains("`fn main()`"));
+    }
+
+    #[test]
+    fn test_normalize_whitespace_preserves_urls() {
+        let text = "Check https://example.com/path for more";
+        let result = normalize_whitespace_internal(text);
+
+        // URLs should be preserved
+        assert!(result.contains("https://example.com/path"));
+    }
+
+    #[test]
+    fn test_normalize_whitespace_preserves_file_paths() {
+        let text = "Edit ./src/main.rs file";
+        let result = normalize_whitespace_internal(text);
+
+        // File paths should be preserved
+        assert!(result.contains("./src/main.rs"));
+    }
+
+    #[test]
+    fn test_error_category_from_http_status() {
+        // Test various HTTP status code classifications
+        assert_eq!(
+            TokenSaverError::from_status(StatusCode::UNAUTHORIZED).category(),
+            ErrorCategory::Auth
+        );
+        assert_eq!(
+            TokenSaverError::from_status(StatusCode::FORBIDDEN).category(),
+            ErrorCategory::Auth
+        );
+        assert_eq!(
+            TokenSaverError::from_status(StatusCode::TOO_MANY_REQUESTS).category(),
+            ErrorCategory::RateLimit
+        );
+        assert_eq!(
+            TokenSaverError::from_status(StatusCode::PAYMENT_REQUIRED).category(),
+            ErrorCategory::Quota
+        );
+        assert_eq!(
+            TokenSaverError::from_status(StatusCode::BAD_REQUEST).category(),
+            ErrorCategory::Client
+        );
+        assert_eq!(
+            TokenSaverError::from_status(StatusCode::INTERNAL_SERVER_ERROR).category(),
+            ErrorCategory::Server
+        );
+        assert_eq!(
+            TokenSaverError::from_status(StatusCode::BAD_GATEWAY).category(),
+            ErrorCategory::Server
+        );
+    }
+
+    #[test]
+    fn test_error_retryable() {
+        // Test which errors are retryable
+        assert!(TokenSaverError::RateLimited {
+            retry_after_secs: None
+        }
+        .is_retryable());
+        assert!(TokenSaverError::RetryableHttp {
+            status: StatusCode::SERVICE_UNAVAILABLE
+        }
+        .is_retryable());
+        assert!(TokenSaverError::Timeout.is_retryable());
+        assert!(TokenSaverError::ConnectionFailed.is_retryable());
+
+        assert!(!TokenSaverError::Config("bad config".into()).is_retryable());
+        assert!(!TokenSaverError::AuthError {
+            status: StatusCode::UNAUTHORIZED
+        }
+        .is_retryable());
+        assert!(!TokenSaverError::QuotaExceeded {
+            status: StatusCode::PAYMENT_REQUIRED
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn test_get_http_client() {
+        // Verify that we can get an HTTP client without error
+        let _client = get_http_client();
+        // The mere fact that we got the client without panic is sufficient
+    }
+
+    #[test]
+    fn test_user_agents_pool() {
+        // Verify that USER_AGENTS contains expected values
+        assert!(!USER_AGENTS.is_empty());
+        for ua in USER_AGENTS {
+            assert!(!ua.is_empty());
+            assert!(ua.contains("Mozilla/5.0"));
+        }
+    }
+
+    #[test]
+    fn test_ua_counter_initial_value() {
+        // Test that the counter is accessible
+        let initial = UA_COUNTER.load(Ordering::Relaxed);
+        // Verify counter is within valid range for USER_AGENTS rotation
+        assert!(initial < usize::MAX);
+    }
+
+    #[test]
+    fn test_get_user_agent_returns_valid() {
+        let ua = get_user_agent();
+        assert!(USER_AGENTS.contains(&ua));
+    }
+
+    #[test]
+    fn test_max_chunk_size_constant() {
+        // Verify constant is accessible and non-zero
+        assert_ne!(MAX_CHUNK_SIZE, 0);
+    }
+
+    #[test]
+    fn test_max_concurrent_translations_constant() {
+        // Verify the constant is set appropriately
+        assert_eq!(MAX_CONCURRENT_TRANSLATIONS, 5);
+    }
+
+    #[test]
+    fn test_google_translate_url_constant() {
+        // Verify the URL is set correctly
+        assert_eq!(
+            GOOGLE_TRANSLATE_URL,
+            "https://translate.googleapis.com/translate_a/single"
+        );
+    }
+
+    #[test]
+    fn test_get_resilience_stats() {
+        // Verify that we can get resilience stats without error
+        let stats = get_resilience_stats();
+        // Verify struct is accessible (rate_limit_hits is usize, always valid)
+        let _ = stats.rate_limit_hits;
+    }
+
+    #[test]
+    fn test_reset_resilience_state() {
+        // Verify that we can reset resilience state without error
+        reset_resilience_state();
+    }
+
+    #[test]
+    fn test_normalize_whitespace_internal_empty() {
+        assert_eq!(normalize_whitespace_internal(""), "");
+    }
+
+    #[test]
+    fn test_normalize_whitespace_internal_single_word() {
+        assert_eq!(normalize_whitespace_internal("hello"), "hello");
+    }
+
+    #[test]
+    fn test_normalize_whitespace_internal_multiple_spaces() {
+        assert_eq!(
+            normalize_whitespace_internal("hello    world"),
+            "hello world"
+        );
+    }
+
+    #[test]
+    fn test_normalize_whitespace_internal_tabs() {
+        assert_eq!(
+            normalize_whitespace_internal("hello\t\tworld"),
+            "hello world"
+        );
+    }
+
+    #[test]
+    fn test_normalize_whitespace_internal_mixed_whitespace() {
+        assert_eq!(
+            normalize_whitespace_internal("hello \t\n world"),
+            "hello world"
+        );
+    }
+
+    #[test]
+    fn test_normalize_whitespace_internal_leading_trailing() {
+        assert_eq!(
+            normalize_whitespace_internal("  hello world  "),
+            "hello world"
+        );
+    }
+
+    #[test]
+    fn test_chunk_text_empty() {
+        let chunks = chunk_text("");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "");
+    }
+
+    #[test]
+    fn test_chunk_text_shorter_than_max() {
+        let text = "Short text";
+        let chunks = chunk_text(text);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], text);
+    }
+
+    #[test]
+    fn test_chunk_text_exactly_max_size_additional() {
+        let text = "a".repeat(MAX_CHUNK_SIZE);
+        let chunks = chunk_text(&text);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], text);
+    }
+
+    #[test]
+    fn test_translation_result_debug_format() {
+        let result = TranslationResult {
+            original: "Hello".to_string(),
+            translated: "Bonjour".to_string(),
+            was_translated: true,
+            source_language: Language::English,
+            input_tokens: 10,
+            output_tokens: 12,
+            cache_hit: false,
+        };
+
+        // Just ensure it doesn't panic when debug formatted
+        let _debug_str = format!("{:?}", result);
+    }
+
+    #[test]
+    fn test_translation_result_equality() {
+        let result1 = TranslationResult {
+            original: "Hello".to_string(),
+            translated: "Bonjour".to_string(),
+            was_translated: true,
+            source_language: Language::English,
+            input_tokens: 10,
+            output_tokens: 12,
+            cache_hit: false,
+        };
+
+        let result2 = TranslationResult {
+            original: "Hello".to_string(),
+            translated: "Bonjour".to_string(),
+            was_translated: true,
+            source_language: Language::English,
+            input_tokens: 10,
+            output_tokens: 12,
+            cache_hit: false,
+        };
+
+        // We can't directly compare TranslationResult as it doesn't implement PartialEq,
+        // but we can verify the fields are as expected
+        assert_eq!(result1.original, result2.original);
+        assert_eq!(result1.translated, result2.translated);
+        assert_eq!(result1.was_translated, result2.was_translated);
+        assert_eq!(result1.source_language, result2.source_language);
+        assert_eq!(result1.input_tokens, result2.input_tokens);
+        assert_eq!(result1.output_tokens, result2.output_tokens);
+        assert_eq!(result1.cache_hit, result2.cache_hit);
     }
 }

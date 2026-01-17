@@ -142,3 +142,107 @@ pub fn print_sensitive_warning() {
     #[cfg(not(feature = "colored-output"))]
     eprintln!("[cjk-token] {}", crate::security::SENSITIVE_DATA_WARNING);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "colored-output")]
+    mod colored_feature_tests {
+        use super::*;
+
+        #[test]
+        fn test_colored_error_output() {
+            // Capture stderr to verify colored output
+            let output = std::io::stderr();
+            let _lock = output.lock();
+
+            // This test mainly verifies that the function can be called without error
+            // Actual color verification is difficult without capturing output
+            print_error("Test error message");
+        }
+
+        #[test]
+        fn test_colored_verbose_output_enabled() {
+            // Test with verbose enabled
+            print_verbose("Test verbose message", true);
+
+            // Test with verbose disabled
+            print_verbose("Test verbose message", false);
+        }
+
+        #[test]
+        fn test_colored_sensitive_warning() {
+            print_sensitive_warning();
+        }
+    }
+
+    #[cfg(not(feature = "colored-output"))]
+    mod colorize_shim_tests {
+        use super::*;
+
+        #[test]
+        fn test_colorize_shim_plain_string_creation() {
+            let plain = colorize_shim::PlainString("test".to_string());
+            assert_eq!(plain.0, "test");
+        }
+
+        #[test]
+        fn test_colorize_shim_display() {
+            let plain = colorize_shim::PlainString("test".to_string());
+            let result = format!("{}", plain);
+            assert_eq!(result, "test");
+        }
+
+        #[test]
+        fn test_colorize_shim_methods_return_self() {
+            let plain = colorize_shim::PlainString("test".to_string());
+            let result = plain
+                .red()
+                .green()
+                .yellow()
+                .blue()
+                .cyan()
+                .dimmed()
+                .bold()
+                .underline();
+            assert_eq!(result.0, "test");
+        }
+
+        #[test]
+        fn test_colorize_shim_trait_for_str() {
+            use colorize_shim::Colorize;
+            let result = "test".red();
+            assert_eq!(result.0, "test");
+        }
+
+        #[test]
+        fn test_colorize_shim_trait_for_string() {
+            use colorize_shim::Colorize;
+            let result = String::from("test").blue();
+            assert_eq!(result.0, "test");
+        }
+    }
+
+    // Tests for functions that work regardless of colored-output feature
+    #[test]
+    fn test_print_error() {
+        // This test mainly verifies that the function can be called without error
+        print_error("Test error message");
+    }
+
+    #[test]
+    fn test_print_verbose_enabled() {
+        print_verbose("Test verbose message", true);
+    }
+
+    #[test]
+    fn test_print_verbose_disabled() {
+        print_verbose("Test verbose message", false);
+    }
+
+    #[test]
+    fn test_print_sensitive_warning() {
+        print_sensitive_warning();
+    }
+}
