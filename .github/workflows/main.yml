@@ -8,15 +8,154 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  BINARY_NAME: cjk-token-reducer
 
 jobs:
-  build:
+  # Verification stage: build, test, lint
+  verify:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
 
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
 
     steps:
     - uses: actions/checkout@v6
+
+    - name: Install Rust toolchain
+      run: |
+        rustup toolchain install stable --profile minimal
+        rustup target add ${{ matrix.target }}
+
+    - name: Rust cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: "v1-rust"
+        shared-key: ${{ matrix.target }}
+
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --verbose --target ${{ matrix.target }}
+
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --verbose --target ${{ matrix.target }}
+
+    - name: Clippy
+      run: cargo clippy --target ${{ matrix.target }} -- -D warnings
+
+  # Build release binaries (only on main branch push)
+  build-release:
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            artifact_name: cjk-token-reducer-linux-x86_64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact_name: cjk-token-reducer-macos-aarch64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Install Rust toolchain
+      run: |
+        rustup toolchain install stable --profile minimal
+        rustup target add ${{ matrix.target }}
+
+    - name: Rust cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: "v1-rust"
+        shared-key: ${{ matrix.target }}
+
+    - name: Build release binary
+      run: cargo build --release --verbose --target ${{ matrix.target }}
+
+    - name: Prepare artifact
+      run: |
+        mkdir -p artifacts
+        cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} artifacts/${{ matrix.artifact_name }}
+        chmod +x artifacts/${{ matrix.artifact_name }}
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.artifact_name }}
+        path: artifacts/${{ matrix.artifact_name }}
+        retention-days: 90
+
+  # Create versioned pre-release with binaries
+  release:
+    needs: build-release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+        merge-multiple: true
+
+    - name: Display artifacts
+      run: ls -la artifacts/
+
+    - name: Get version and date
+      id: meta
+      run: |
+        VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+        DATE=$(date -u '+%Y%m%d')
+        SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "date=$DATE" >> $GITHUB_OUTPUT
+        echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+        echo "release_tag=v${VERSION}-${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+        echo "Version: $VERSION, Date: $DATE, Tag: v${VERSION}-${DATE}-${SHORT_SHA}"
+
+    - name: Create checksums
+      run: |
+        cd artifacts
+        sha256sum * > checksums-sha256.txt
+        cat checksums-sha256.txt
+
+    - name: Create versioned pre-release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release create ${{ steps.meta.outputs.release_tag }} \
+          --prerelease \
+          --title "Build v${{ steps.meta.outputs.version }} (${{ steps.meta.outputs.date }}-${{ steps.meta.outputs.short_sha }})" \
+          --notes "Automated pre-release build from main branch.
+
+        **Version:** ${{ steps.meta.outputs.version }}
+        **Commit:** ${{ github.sha }}
+        **Built:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+        ## Binaries
+        - \`cjk-token-reducer-linux-x86_64\` - Ubuntu 24.04 (x86_64)
+        - \`cjk-token-reducer-macos-aarch64\` - macOS (Apple Silicon)
+
+        ## Installation
+        \`\`\`bash
+        # Linux x86_64
+        curl -Lo cjk-token-reducer https://github.com/${{ github.repository }}/releases/download/${{ steps.meta.outputs.release_tag }}/cjk-token-reducer-linux-x86_64
+        chmod +x cjk-token-reducer
+
+        # macOS Apple Silicon
+        curl -Lo cjk-token-reducer https://github.com/${{ github.repository }}/releases/download/${{ steps.meta.outputs.release_tag }}/cjk-token-reducer-macos-aarch64
+        chmod +x cjk-token-reducer
+        \`\`\`
+        " \
+          artifacts/*
