@@ -54,6 +54,421 @@ static ENGLISH_TERM_RE: Lazy<Regex> = Lazy::new(|| {
     ").unwrap()
 });
 
+// === Term Detector Abstraction ===
+
+/// A detected term with byte offsets
+#[derive(Debug, Clone)]
+pub struct TermMatch {
+    pub text: String,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Trait for term detection strategies
+pub trait TermDetector: Send + Sync {
+    fn detect(&self, text: &str) -> Vec<TermMatch>;
+}
+
+/// Regex-based detector (all platforms, fallback behavior)
+pub struct RegexTermDetector;
+
+impl TermDetector for RegexTermDetector {
+    fn detect(&self, text: &str) -> Vec<TermMatch> {
+        ENGLISH_TERM_RE
+            .find_iter(text)
+            .filter(|m| !m.as_str().contains('\u{FEFF}')) // Skip placeholder text
+            .map(|m| TermMatch {
+                text: m.as_str().to_string(),
+                start: m.start(),
+                end: m.end(),
+            })
+            .collect()
+    }
+}
+
+// === macOS NLP Implementation ===
+
+#[cfg(all(target_os = "macos", feature = "macos-nlp"))]
+mod macos_nlp {
+    use super::*;
+
+    // =========================================================================
+    // FFI Module - All unsafe Objective-C interactions are isolated here
+    // =========================================================================
+    mod ffi {
+        use objc2::rc::Retained;
+        use objc2::ClassType;
+        use objc2_foundation::{NSArray, NSCopying, NSRange, NSString, NSValue};
+        use objc2_natural_language::{
+            NLTagOrganizationName, NLTagPersonalName, NLTagPlaceName, NLTagSchemeNameType,
+            NLTagger, NLTaggerOptions, NLTokenUnit,
+        };
+        use std::cell::RefCell;
+
+        /// A named entity detected by NLTagger with UTF-16 offsets.
+        /// This is the safe output from FFI - no Objective-C types exposed.
+        #[derive(Debug, Clone)]
+        pub struct NamedEntity {
+            pub text: String,
+            /// UTF-16 offset (NSString indexing)
+            pub utf16_start: usize,
+            /// UTF-16 length
+            pub utf16_length: usize,
+        }
+
+        /// Internal cached tagger state (not exposed outside ffi module).
+        struct CachedTagger {
+            tagger: Retained<NLTagger>,
+            name_type_scheme: Retained<NSString>,
+        }
+
+        impl CachedTagger {
+            /// Create a new cached tagger. Returns None if tag scheme unavailable.
+            fn new() -> Option<Self> {
+                // SAFETY: NLTagSchemeNameType is a valid static constant when the
+                // NaturalLanguage framework is linked (guaranteed on macOS 10.14+).
+                let name_type_scheme = unsafe { NLTagSchemeNameType }?;
+
+                let tag_schemes: Retained<NSArray<NSString>> =
+                    NSArray::from_id_slice(&[name_type_scheme.copy()]);
+
+                // SAFETY: NLTagger::alloc returns a valid allocation, and
+                // initWithTagSchemes properly initializes it. The tag_schemes
+                // array remains valid for the duration of this call.
+                let tagger =
+                    unsafe { NLTagger::initWithTagSchemes(NLTagger::alloc(), &tag_schemes) };
+
+                Some(CachedTagger {
+                    tagger,
+                    name_type_scheme: name_type_scheme.copy(),
+                })
+            }
+        }
+
+        // Thread-local cached tagger to avoid allocation overhead per call.
+        thread_local! {
+            static CACHED_TAGGER: RefCell<Option<CachedTagger>> = const { RefCell::new(None) };
+        }
+
+        /// Safe wrapper for NLTagger operations.
+        /// All unsafe FFI code is encapsulated within this struct's methods.
+        pub struct Tagger;
+
+        impl Tagger {
+            /// Detect named entities (PersonalName, PlaceName, OrganizationName) in text.
+            /// Returns entities with UTF-16 offsets (caller must convert to UTF-8).
+            ///
+            /// This is the single safe entry point for NLTagger operations.
+            /// All unsafe Objective-C interactions are contained within this method.
+            pub fn detect_named_entities(text: &str) -> Vec<NamedEntity> {
+                let mut entities = Vec::new();
+
+                // Create NSString from Rust string (safe - objc2 handles encoding)
+                let ns_string = NSString::from_str(text);
+
+                CACHED_TAGGER.with(|cache| {
+                    let mut cache = cache.borrow_mut();
+
+                    // Lazily initialize the cached tagger
+                    if cache.is_none() {
+                        *cache = CachedTagger::new();
+                    }
+
+                    let Some(cached) = cache.as_ref() else {
+                        // Tag scheme unavailable - return empty
+                        return;
+                    };
+
+                    // SAFETY: tagger and ns_string are valid Retained objects.
+                    // ns_string remains valid for the duration of this closure.
+                    unsafe { cached.tagger.setString(Some(&ns_string)) };
+
+                    let range = NSRange::new(0, ns_string.length());
+                    // NLTaggerOmitOther prevents NSNull in tags array for unrecognized tokens
+                    let options = NLTaggerOptions::NLTaggerOmitPunctuation
+                        | NLTaggerOptions::NLTaggerOmitWhitespace
+                        | NLTaggerOptions::NLTaggerOmitOther
+                        | NLTaggerOptions::NLTaggerJoinNames;
+
+                    let mut token_ranges_out: Option<Retained<NSArray<NSValue>>> = None;
+
+                    // SAFETY: All parameters are valid:
+                    // - range is within ns_string bounds (0..length)
+                    // - name_type_scheme is a valid tag scheme
+                    // - token_ranges_out is a valid out-parameter
+                    let tags = unsafe {
+                        cached.tagger.tagsInRange_unit_scheme_options_tokenRanges(
+                            range,
+                            NLTokenUnit::Word,
+                            &cached.name_type_scheme,
+                            options,
+                            Some(&mut token_ranges_out),
+                        )
+                    };
+
+                    // SAFETY: These are valid static constants from the framework.
+                    let personal_name = unsafe { NLTagPersonalName };
+                    let place_name = unsafe { NLTagPlaceName };
+                    let org_name = unsafe { NLTagOrganizationName };
+
+                    if let Some(token_ranges) = token_ranges_out {
+                        let count = tags.count().min(token_ranges.count());
+
+                        for idx in 0..count {
+                            // SAFETY: idx is within bounds due to min() above.
+                            let tag = unsafe { tags.objectAtIndex(idx) };
+                            let range_value = unsafe { token_ranges.objectAtIndex(idx) };
+
+                            // Check if this is a named entity type we care about
+                            // SAFETY: isEqualToString is safe to call on valid NSString refs.
+                            let is_named_entity = personal_name
+                                .is_some_and(|pn| unsafe { tag.isEqualToString(pn) })
+                                || place_name.is_some_and(|pl| unsafe { tag.isEqualToString(pl) })
+                                || org_name.is_some_and(|on| unsafe { tag.isEqualToString(on) });
+
+                            if is_named_entity {
+                                // SAFETY: range_value is a valid NSValue containing NSRange.
+                                let token_range: NSRange = unsafe { range_value.rangeValue() };
+
+                                // SAFETY: token_range is within ns_string bounds (from tagger).
+                                let token_ns_string =
+                                    unsafe { ns_string.substringWithRange(token_range) };
+                                let token_text = token_ns_string.to_string();
+
+                                entities.push(NamedEntity {
+                                    text: token_text,
+                                    utf16_start: token_range.location,
+                                    utf16_length: token_range.length,
+                                });
+                            }
+                        }
+                    }
+
+                    // SAFETY: Setting string to None releases the reference safely.
+                    unsafe { cached.tagger.setString(None) };
+                });
+
+                entities
+            }
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+
+            #[test]
+            fn test_tagger_returns_entities() {
+                // Basic smoke test - NLTagger should not panic
+                let entities = Tagger::detect_named_entities("Tim Cook works at Apple");
+                // We don't assert specific results as NER behavior may vary by OS version
+                let _ = entities;
+            }
+
+            #[test]
+            fn test_tagger_handles_empty_string() {
+                let entities = Tagger::detect_named_entities("");
+                assert!(entities.is_empty());
+            }
+
+            #[test]
+            fn test_tagger_handles_no_entities() {
+                let entities = Tagger::detect_named_entities("hello world");
+                // May or may not find entities - just verify no panic
+                let _ = entities;
+            }
+        }
+    }
+
+    // =========================================================================
+    // Public API - Safe wrappers using the ffi module
+    // =========================================================================
+
+    pub struct MacOsTermDetector;
+
+    impl MacOsTermDetector {
+        /// Convert UTF-16 offset to UTF-8 byte offset.
+        /// Pure Rust implementation - no unsafe code.
+        fn utf16_to_utf8_offset(text: &str, utf16_offset: usize) -> Option<usize> {
+            let mut utf16_pos = 0;
+            for (byte_idx, ch) in text.char_indices() {
+                if utf16_pos == utf16_offset {
+                    return Some(byte_idx);
+                }
+                utf16_pos += ch.len_utf16();
+            }
+            if utf16_pos == utf16_offset {
+                Some(text.len())
+            } else {
+                None
+            }
+        }
+
+        /// Check if a character is in the Latin script (including extended Latin).
+        /// Covers: Basic Latin, Latin-1 Supplement (letters only), Latin Extended-A/B,
+        /// Latin Extended Additional. Excludes math symbols like × ÷.
+        /// Pure Rust implementation - no unsafe code.
+        fn is_latin_char(c: char) -> bool {
+            matches!(
+                c,
+                // Basic Latin (ASCII letters and digits)
+                'A'..='Z' | 'a'..='z' | '0'..='9' |
+                // Common punctuation allowed in names
+                ' ' | '-' | '\'' | '.' | ',' |
+                // Latin-1 Supplement letters (excluding × at U+00D7 and ÷ at U+00F7)
+                '\u{00C0}'..='\u{00D6}' |  // À-Ö
+                '\u{00D8}'..='\u{00F6}' |  // Ø-ö
+                '\u{00F8}'..='\u{00FF}' |  // ø-ÿ
+                // Latin Extended-A (Ā-ſ)
+                '\u{0100}'..='\u{017F}' |
+                // Latin Extended-B (ƀ-ɏ)
+                '\u{0180}'..='\u{024F}' |
+                // Latin Extended Additional (Ḁ-ỿ, Vietnamese, etc.)
+                '\u{1E00}'..='\u{1EFF}'
+            )
+        }
+
+        /// Check if string contains only Latin script characters.
+        /// Allows names like "René", "München", "François" while excluding CJK.
+        /// Pure Rust implementation - no unsafe code.
+        fn is_latin_only(s: &str) -> bool {
+            s.chars().all(Self::is_latin_char)
+        }
+    }
+
+    impl TermDetector for MacOsTermDetector {
+        fn detect(&self, text: &str) -> Vec<TermMatch> {
+            // Start with regex-based detection for technical terms
+            let mut results = RegexTermDetector.detect(text);
+
+            // Helper to check if a new range overlaps with any existing matches
+            let is_overlapping = |start: usize, end: usize, existing: &[TermMatch]| -> bool {
+                existing.iter().any(|m| {
+                    // Check for intersection: max(start1, start2) < min(end1, end2)
+                    start.max(m.start) < end.min(m.end)
+                })
+            };
+
+            // Use the safe FFI wrapper to detect named entities
+            let entities = ffi::Tagger::detect_named_entities(text);
+
+            // Process entities - add NLP-detected named entities that regex missed
+            for entity in entities {
+                // Skip entities that overlap with existing placeholders (contain FEFF marker)
+                // This prevents corruption when NLP runs on text with prior placeholder insertions
+                if entity.text.contains('\u{FEFF}') {
+                    continue;
+                }
+
+                // Only preserve Latin script names (excludes CJK like "张伟")
+                // but includes names like "René", "München", "François"
+                if Self::is_latin_only(&entity.text) && !entity.text.is_empty() {
+                    // Convert UTF-16 offsets to UTF-8 byte offsets
+                    if let (Some(start), Some(end)) = (
+                        Self::utf16_to_utf8_offset(text, entity.utf16_start),
+                        Self::utf16_to_utf8_offset(text, entity.utf16_start + entity.utf16_length),
+                    ) {
+                        // Only add if not already covered by regex (prevent partial overlaps)
+                        if !is_overlapping(start, end, &results) {
+                            results.push(TermMatch {
+                                text: entity.text,
+                                start,
+                                end,
+                            });
+                        }
+                    }
+                }
+            }
+
+            results
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_utf16_to_utf8_offset_ascii() {
+            let text = "hello world";
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 0), Some(0));
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 5), Some(5));
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 11), Some(11));
+        }
+
+        #[test]
+        fn test_utf16_to_utf8_offset_cjk() {
+            // Korean: "안녕" (2 chars, 6 UTF-8 bytes, 1 UTF-16 code unit each)
+            let text = "안녕";
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 0), Some(0));
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 1), Some(3)); // After first char
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 2), Some(6));
+            // End
+        }
+
+        #[test]
+        fn test_utf16_to_utf8_offset_mixed() {
+            // "Hi안녕" - 2 ASCII + 2 Korean
+            let text = "Hi안녕";
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 0), Some(0)); // H
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 2), Some(2)); // After "Hi"
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 3), Some(5)); // After "Hi안"
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 4), Some(8));
+            // End
+        }
+
+        #[test]
+        fn test_is_latin_only() {
+            // Basic ASCII
+            assert!(MacOsTermDetector::is_latin_only("hello"));
+            assert!(MacOsTermDetector::is_latin_only("Tim Cook"));
+            assert!(MacOsTermDetector::is_latin_only("Apple123"));
+            // Latin extended characters (accents, umlauts)
+            assert!(MacOsTermDetector::is_latin_only("René"));
+            assert!(MacOsTermDetector::is_latin_only("München"));
+            assert!(MacOsTermDetector::is_latin_only("José García"));
+            assert!(MacOsTermDetector::is_latin_only("Zürich"));
+            assert!(MacOsTermDetector::is_latin_only("Ångström"));
+            // CJK should be rejected
+            assert!(!MacOsTermDetector::is_latin_only("张伟"));
+            assert!(!MacOsTermDetector::is_latin_only("Tim张"));
+            assert!(!MacOsTermDetector::is_latin_only("東京"));
+            assert!(!MacOsTermDetector::is_latin_only("서울"));
+            // Math symbols should be rejected (× = U+00D7, ÷ = U+00F7)
+            assert!(!MacOsTermDetector::is_latin_only("3×4"));
+            assert!(!MacOsTermDetector::is_latin_only("8÷2"));
+        }
+
+        #[test]
+        fn test_macos_detector_basic() {
+            let detector = MacOsTermDetector;
+            // This tests that the detector can be instantiated and called
+            // Actual NER results depend on the macOS NLP model
+            let _matches = detector.detect("Tim Cook works at Apple");
+            // We don't assert specific results as NER behavior may vary
+        }
+
+        #[test]
+        fn test_macos_detector_filters_cjk_names() {
+            let detector = MacOsTermDetector;
+            let matches = detector.detect("张伟 works at 苹果公司");
+            // Should NOT preserve Chinese names (filtered by is_latin_only)
+            assert!(!matches.iter().any(|m| m.text.contains('张')));
+            assert!(!matches.iter().any(|m| m.text.contains('苹')));
+        }
+    }
+}
+
+/// Get the appropriate term detector for the platform and configuration
+#[allow(unused_variables)]
+pub fn get_term_detector(use_nlp: bool) -> Box<dyn TermDetector> {
+    #[cfg(all(target_os = "macos", feature = "macos-nlp"))]
+    if use_nlp {
+        return Box::new(macos_nlp::MacOsTermDetector);
+    }
+
+    Box::new(RegexTermDetector)
+}
+
 /// Configuration for preservation behavior
 #[derive(Debug, Clone, Default)]
 pub struct PreserveConfig {
@@ -63,6 +478,8 @@ pub struct PreserveConfig {
     pub highlight_markers: bool,
     /// Enable auto-detection of English technical terms in CJK text
     pub english_terms: bool,
+    /// Use macOS NLP for term detection (macOS only, falls back to regex)
+    pub use_nlp: bool,
 }
 
 impl PreserveConfig {
@@ -72,6 +489,7 @@ impl PreserveConfig {
             wiki_markers: true,
             highlight_markers: true,
             english_terms: true,
+            use_nlp: true, // Enable NLP by default on macOS
         }
     }
 
@@ -206,15 +624,25 @@ pub fn extract_and_preserve_with_config(text: &str, config: &PreserveConfig) -> 
     );
 
     // 7. English technical terms (lowest priority - only in remaining text)
+    // Uses either macOS NLP (if enabled and available) or regex fallback
     if config.english_terms {
-        result = replace_with_placeholders(
-            &result,
-            &ENGLISH_TERM_RE,
-            SegmentType::EnglishTerm,
-            &mut segments,
-            &mut index,
-            false,
-        );
+        let detector = get_term_detector(config.use_nlp);
+        let mut terms = detector.detect(&result);
+
+        // Sort by start position descending to process in reverse order
+        // This preserves byte indices during replacement
+        terms.sort_by(|a, b| b.start.cmp(&a.start));
+
+        for term in terms {
+            let placeholder = format!("\u{FEFF}cjkengterm{index}\u{FEFF}");
+            segments.push(PreservedSegment {
+                placeholder: placeholder.clone(),
+                original: term.text,
+                segment_type: SegmentType::EnglishTerm,
+            });
+            result.replace_range(term.start..term.end, &placeholder);
+            index += 1;
+        }
     }
 
     PreserveResult {

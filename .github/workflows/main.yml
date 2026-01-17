@@ -18,8 +18,10 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            features: ""
           - os: macos-14
             target: aarch64-apple-darwin
+            features: "macos-nlp"
 
     runs-on: ${{ matrix.os }}
 
@@ -38,13 +40,13 @@ jobs:
         shared-key: ${{ matrix.target }}
 
     - name: Build
-      run: cargo build --verbose --target ${{ matrix.target }}
+      run: cargo build --verbose --target ${{ matrix.target }} ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
 
     - name: Run tests
-      run: cargo test --verbose --target ${{ matrix.target }}
+      run: cargo test --verbose --target ${{ matrix.target }} ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
 
     - name: Clippy
-      run: cargo clippy --target ${{ matrix.target }} -- -D warnings
+      run: cargo clippy --target ${{ matrix.target }} ${{ matrix.features && format('--features {0}', matrix.features) || '' }} -- -D warnings
 
   # Build release binaries (only on main branch push)
   build-release:
@@ -57,9 +59,11 @@ jobs:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             artifact_name: cjk-token-reducer-linux-x86_64
+            features: ""
           - os: macos-14
             target: aarch64-apple-darwin
             artifact_name: cjk-token-reducer-macos-aarch64
+            features: "macos-nlp"
 
     runs-on: ${{ matrix.os }}
 
@@ -78,7 +82,7 @@ jobs:
         shared-key: ${{ matrix.target }}
 
     - name: Build release binary
-      run: cargo build --release --verbose --target ${{ matrix.target }}
+      run: cargo build --release --verbose --target ${{ matrix.target }} ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
 
     - name: Prepare artifact
       run: |

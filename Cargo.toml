@@ -26,6 +26,8 @@ cache = ["dep:sled", "dep:sha2", "dep:hex"]
 tokenizer = ["dep:claude-tokenizer"]
 # Colored terminal output
 colored-output = ["dep:colored"]
+# macOS NLP for ML-based term detection (macOS only)
+macos-nlp = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-natural-language"]
 
 [dependencies]
 # Core dependencies (always included)
@@ -51,6 +53,12 @@ colored = { version = "2", optional = true }
 
 # Optional: Claude tokenizer
 claude-tokenizer = { version = "0.3", optional = true }
+
+# Optional: macOS NLP dependencies (macOS only)
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.5", optional = true }
+objc2-foundation = { version = "0.2", features = ["NSString", "NSArray", "NSRange", "NSValue", "NSObject"], optional = true }
+objc2-natural-language = { version = "0.2", features = ["NLTagger", "NLTagScheme", "NLTokenizer"], optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

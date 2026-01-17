@@ -106,6 +106,10 @@ pub struct PreserveConfig {
     /// Auto-preserve English technical terms like camelCase, SCREAMING_CASE (default: true)
     #[serde(default = "default_true")]
     pub english_terms: bool,
+
+    /// Use macOS NLP for term detection (macOS only, falls back to regex; default: true)
+    #[serde(default = "default_true")]
+    pub use_nlp: bool,
 }
 
 fn default_true() -> bool {
@@ -118,6 +122,7 @@ impl Default for PreserveConfig {
             wiki_markers: true,
             highlight_markers: true,
             english_terms: true,
+            use_nlp: true,
         }
     }
 }
@@ -128,6 +133,7 @@ impl From<&PreserveConfig> for crate::preserver::PreserveConfig {
             wiki_markers: config.wiki_markers,
             highlight_markers: config.highlight_markers,
             english_terms: config.english_terms,
+            use_nlp: config.use_nlp,
         }
     }
 }
@@ -302,6 +308,7 @@ mod tests {
         assert!(config.wiki_markers);
         assert!(config.highlight_markers);
         assert!(config.english_terms);
+        assert!(config.use_nlp);
     }
 
     #[test]
@@ -312,6 +319,7 @@ mod tests {
         assert!(config.wiki_markers);
         assert!(config.highlight_markers);
         assert!(config.english_terms);
+        assert!(config.use_nlp);
     }
 
     #[test]
@@ -322,6 +330,23 @@ mod tests {
         assert!(!config.wiki_markers); // overridden
         assert!(config.highlight_markers); // default
         assert!(config.english_terms); // default
+        assert!(config.use_nlp); // default
+    }
+
+    #[test]
+    fn test_preserve_config_to_preserver_config() {
+        // Test the From conversion including use_nlp field
+        let config = PreserveConfig {
+            wiki_markers: false,
+            highlight_markers: true,
+            english_terms: false,
+            use_nlp: false,
+        };
+        let preserver_config: crate::preserver::PreserveConfig = (&config).into();
+        assert!(!preserver_config.wiki_markers);
+        assert!(preserver_config.highlight_markers);
+        assert!(!preserver_config.english_terms);
+        assert!(!preserver_config.use_nlp);
     }
 
     #[test]
