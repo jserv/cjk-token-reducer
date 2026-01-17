@@ -1,0 +1,25 @@
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        base: auto
+        informational: true
+        only_pulls: false
+    patch:
+      default:
+        target: auto
+        threshold: 1%
+        base: auto
+        informational: true
+
+ignore:
+  - "src/main.rs"
+  - "**/tests/**"
+  - "**/*_test.rs"
+
+comment:
+  layout: "reach,diff,flags,tree"
+  behavior: default
+  require_changes: false
