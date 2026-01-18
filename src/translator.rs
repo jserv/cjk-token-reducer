@@ -344,8 +344,7 @@ pub async fn translate_to_english_with_options(
     }
 
     // Preserve code/URLs/markers before translation
-    let preserve_config = (&config.preserve).into();
-    let preserved = extract_and_preserve_with_config(text, &preserve_config);
+    let preserved = extract_and_preserve_with_config(text, &config.preserve);
 
     // Apply whitespace normalization to placeholder text (preserve-aware)
     // Uses Cow to avoid allocation when normalization is disabled
@@ -361,26 +360,31 @@ pub async fn translate_to_english_with_options(
     } else {
         None
     };
-    let cache_key =
-        TranslationCache::make_key(detection.language.code(), "en", &text_for_translation);
+
+    // Compute cache key once (only if cache is enabled)
+    let cache_key = cache.as_ref().map(|_| {
+        TranslationCache::make_key(detection.language.code(), "en", &text_for_translation)
+    });
 
     // Try cache lookup
     if let Some(ref c) = cache {
-        if let Some(entry) = c.get(&cache_key) {
-            // Cache hit - restore preserved segments and return
-            let final_text = restore_preserved(&entry.translated, &preserved.segments);
-            let input_tokens = count_tokens(text);
-            let output_tokens = count_tokens(&final_text);
+        if let Some(key) = &cache_key {
+            if let Some(entry) = c.get(key) {
+                // Cache hit - restore preserved segments and return
+                let final_text = restore_preserved(&entry.translated, &preserved.segments);
+                let input_tokens = count_tokens(text);
+                let output_tokens = count_tokens(&final_text);
 
-            return Ok(TranslationResult {
-                original: text.to_string(),
-                translated: final_text,
-                was_translated: true,
-                source_language: detection.language,
-                input_tokens,
-                output_tokens,
-                cache_hit: true,
-            });
+                return Ok(TranslationResult {
+                    original: text.to_string(),
+                    translated: final_text,
+                    was_translated: true,
+                    source_language: detection.language,
+                    input_tokens,
+                    output_tokens,
+                    cache_hit: true,
+                });
+            }
         }
     }
 
@@ -389,14 +393,16 @@ pub async fn translate_to_english_with_options(
         translate_with_chunking(&text_for_translation, detection.language).await?;
 
     // Store in cache (reuse opened instance)
-    if let Some(c) = cache {
-        let entry = CacheEntry {
-            translated: translated_text.clone(),
-            timestamp: Utc::now().timestamp(),
-            source_lang: detection.language.code().to_string(),
-            target_lang: "en".to_string(),
-        };
-        c.put(&cache_key, &entry);
+    if let Some(ref c) = cache {
+        if let Some(key) = &cache_key {
+            let entry = CacheEntry {
+                translated: translated_text.clone(),
+                timestamp: Utc::now().timestamp(),
+                source_lang: detection.language.code().to_string(),
+                target_lang: "en".to_string(),
+            };
+            c.put(key, &entry);
+        }
     }
 
     // Restore preserved segments

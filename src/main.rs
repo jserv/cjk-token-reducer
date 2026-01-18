@@ -3,7 +3,7 @@ use cjk_token_reducer::{
     config::load_config,
     detector::{detect_language, Language},
     output::{print_error, print_sensitive_warning, print_verbose, Colorize},
-    preserver::{extract_and_preserve_with_config, SegmentType},
+    preserver::{extract_and_preserve_with_config, PreservedSegment, SegmentType},
     security::sanitize_for_log,
     stats::{format_stats, format_stats_csv, format_stats_json, load_stats, record_translation},
     tokenizer::{count_tokens_with_fallback, tokenize_with_fallback},
@@ -22,6 +22,17 @@ struct HookInput {
 #[derive(Serialize)]
 struct HookOutput {
     prompt: String,
+}
+
+/// Filter preserved segments by type (module-level helper for reuse)
+fn filter_segments_by_type(
+    segments: &[PreservedSegment],
+    seg_type: SegmentType,
+) -> Vec<&PreservedSegment> {
+    segments
+        .iter()
+        .filter(|s| s.segment_type == seg_type)
+        .collect()
 }
 
 /// Read prompt from stdin, supporting both JSON and plain text formats
@@ -56,18 +67,21 @@ fn read_prompt_from_stdin() -> Option<String> {
 
 #[tokio::main]
 async fn main() {
+    use std::collections::HashSet;
+
     let args: Vec<String> = std::env::args().collect();
-    let use_cache = !args.iter().any(|s| s == "--no-cache");
-    let verbose = args.iter().any(|s| s == "--verbose" || s == "-v");
+    let args_set: HashSet<&str> = args.iter().map(|s| s.as_str()).collect();
+    let use_cache = !args_set.contains("--no-cache");
+    let verbose = args_set.contains("--verbose") || args_set.contains("-v");
 
     // Handle CLI commands
     match args.get(1).map(String::as_str) {
         Some("--stats") => {
             let stats = load_stats();
             // Check for export format
-            if args.iter().any(|s| s == "--json") {
+            if args_set.contains("--json") {
                 println!("{}", format_stats_json(&stats));
-            } else if args.iter().any(|s| s == "--csv") {
+            } else if args_set.contains("--csv") {
                 println!("{}", format_stats_csv(&stats));
             } else {
                 println!("{}", format_stats(&stats));
@@ -212,8 +226,7 @@ fn handle_dry_run() {
 
     let config = load_config();
     let detection = detect_language(&prompt);
-    let preserve_config = (&config.preserve).into();
-    let preserved = extract_and_preserve_with_config(&prompt, &preserve_config);
+    let preserved = extract_and_preserve_with_config(&prompt, &config.preserve);
 
     println!("{}", "Dry Run Analysis".bold().underline());
     println!();
@@ -269,27 +282,17 @@ fn handle_show_preserved() {
     print_sensitive_warning();
 
     let config = load_config();
-    let preserve_config = (&config.preserve).into();
-    let preserved = extract_and_preserve_with_config(&prompt, &preserve_config);
+    let preserved = extract_and_preserve_with_config(&prompt, &config.preserve);
 
     println!("{}", "Preserved Segments Analysis".bold().underline());
     println!();
 
-    // Helper to filter segments by type
-    let filter_by_type = |seg_type: SegmentType| -> Vec<_> {
-        preserved
-            .segments
-            .iter()
-            .filter(|s| s.segment_type == seg_type)
-            .collect()
-    };
-
-    let code_blocks = filter_by_type(SegmentType::CodeBlock);
-    let inline_code = filter_by_type(SegmentType::InlineCode);
-    let urls = filter_by_type(SegmentType::Url);
-    let paths = filter_by_type(SegmentType::FilePath);
-    let no_translate = filter_by_type(SegmentType::NoTranslate);
-    let english_terms = filter_by_type(SegmentType::EnglishTerm);
+    let code_blocks = filter_segments_by_type(&preserved.segments, SegmentType::CodeBlock);
+    let inline_code = filter_segments_by_type(&preserved.segments, SegmentType::InlineCode);
+    let urls = filter_segments_by_type(&preserved.segments, SegmentType::Url);
+    let paths = filter_segments_by_type(&preserved.segments, SegmentType::FilePath);
+    let no_translate = filter_segments_by_type(&preserved.segments, SegmentType::NoTranslate);
+    let english_terms = filter_segments_by_type(&preserved.segments, SegmentType::EnglishTerm);
 
     // Print summary
     println!(
@@ -367,6 +370,9 @@ fn handle_show_preserved() {
 }
 
 fn handle_tokenize(args: &[String]) {
+    use std::collections::HashSet;
+
+    let args_set: HashSet<&str> = args.iter().map(|s| s.as_str()).collect();
     let prompt = match read_prompt_from_stdin() {
         Some(p) if p.is_empty() => {
             print_error("No input provided");
@@ -376,9 +382,9 @@ fn handle_tokenize(args: &[String]) {
         None => std::process::exit(1),
     };
 
-    let show_tokens = args.iter().any(|s| s == "--show-tokens");
-    let json_output = args.iter().any(|s| s == "--json");
-    let include_text = args.iter().any(|s| s == "--include-text");
+    let show_tokens = args_set.contains("--show-tokens");
+    let json_output = args_set.contains("--json");
+    let include_text = args_set.contains("--include-text");
     let detection = detect_language(&prompt);
 
     // Security: warn about sensitive data in debug output (unless JSON-only)
