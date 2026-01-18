@@ -361,8 +361,8 @@ fn current_timestamp_secs() -> u64 {
     })
 }
 
-/// Thread-local mock time in seconds (0 = use real time)
-/// Using thread-local ensures parallel tests don't interfere with each other.
+// Thread-local mock time in seconds (0 = use real time).
+// Using thread-local ensures parallel tests don't interfere with each other.
 #[cfg(test)]
 thread_local! {
     static MOCK_TIME_SECS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
