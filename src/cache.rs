@@ -66,7 +66,7 @@ pub fn format_cache_stats(stats: &CacheStats) -> String {
 #[cfg(feature = "cache")]
 mod cache_impl {
     use super::*;
-    use crate::error::TokenSaverError;
+    use crate::error::Error;
     use chrono::Utc;
     use sha2::{Digest, Sha256};
     use std::path::PathBuf;
@@ -99,8 +99,8 @@ mod cache_impl {
 
             // Ensure parent directory exists
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    TokenSaverError::Cache(format!("Failed to create cache dir: {e}"))
+                std::fs::create_dir_all(parent).map_err(|e| Error::Cache {
+                    message: format!("Failed to create cache dir: {e}"),
                 })?;
             }
 
@@ -120,11 +120,14 @@ mod cache_impl {
                     msg.contains("lock") || msg.contains("busy") || msg.contains("flock");
 
                 if is_lock_error || is_lock_msg {
-                    TokenSaverError::Cache(
-                        "Cache locked by another process. Use --no-cache to bypass.".into(),
-                    )
+                    Error::Cache {
+                        message: "Cache locked by another process. Use --no-cache to bypass."
+                            .into(),
+                    }
                 } else {
-                    TokenSaverError::Cache(format!("Failed to open cache: {e}"))
+                    Error::Cache {
+                        message: format!("Failed to open cache: {e}"),
+                    }
                 }
             })?;
 
@@ -142,13 +145,14 @@ mod cache_impl {
         pub fn open_at_path(config: &CacheConfig, path: &std::path::Path) -> Result<Self> {
             // Ensure parent directory exists
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    TokenSaverError::Cache(format!("Failed to create cache dir: {e}"))
+                std::fs::create_dir_all(parent).map_err(|e| Error::Cache {
+                    message: format!("Failed to create cache dir: {e}"),
                 })?;
             }
 
-            let db = sled::open(path)
-                .map_err(|e| TokenSaverError::Cache(format!("Failed to open cache: {e}")))?;
+            let db = sled::open(path).map_err(|e| Error::Cache {
+                message: format!("Failed to open cache: {e}"),
+            })?;
 
             Ok(Self {
                 db,
@@ -222,9 +226,9 @@ mod cache_impl {
 
         /// Clear all cached translations
         pub fn clear(&self) -> Result<()> {
-            self.db
-                .clear()
-                .map_err(|e| TokenSaverError::Cache(format!("Failed to clear cache: {e}")))?;
+            self.db.clear().map_err(|e| Error::Cache {
+                message: format!("Failed to clear cache: {e}"),
+            })?;
             let _ = self.db.flush();
             Ok(())
         }

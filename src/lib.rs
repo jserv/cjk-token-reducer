@@ -9,3 +9,5 @@ pub mod security;
 pub mod stats;
 pub mod tokenizer;
 pub mod translator;
+
+pub use error::{Error, Result};
