@@ -4,6 +4,10 @@ all:
 clean:
 	cargo clean
 
+check:
+	cargo test
+	cargo clippy -- -D warnings
+
 indent:
 	cargo fmt
 
