@@ -2,7 +2,7 @@ use crate::{
     cache::{CacheEntry, TranslationCache},
     config::{Config, ResilienceConfig},
     detector::{detect_language, Language},
-    error::{Result, TokenSaverError},
+    error::{Error, Result},
     preserver::{extract_and_preserve_with_config, restore_preserved},
     resilience::{CircuitBreaker, CircuitBreakerStats, RateLimiter},
     tokenizer::count_tokens,
@@ -246,9 +246,7 @@ async fn google_translate_with_retry_config(
 
     // Check circuit breaker first
     if !cb.allow_request() {
-        return Err(TokenSaverError::CircuitOpen(
-            config.circuit_breaker_reset_secs,
-        ));
+        return Err(Error::CircuitOpen(config.circuit_breaker_reset_secs));
     }
 
     let mut last_error = None;
@@ -268,7 +266,7 @@ async fn google_translate_with_retry_config(
                 // Handle rate limiting specifically - extract Retry-After if available
                 if let Some(retry_after) = e.retry_after_secs() {
                     rl.record_rate_limit(Some(retry_after));
-                } else if matches!(e, TokenSaverError::RateLimited { .. }) {
+                } else if matches!(e, Error::RateLimited { .. }) {
                     rl.record_rate_limit(None);
                 }
 
@@ -294,7 +292,9 @@ async fn google_translate_with_retry_config(
 
     // All retries exhausted
     cb.record_failure();
-    Err(last_error.unwrap_or_else(|| TokenSaverError::Translation("Max retries exceeded".into())))
+    Err(last_error.unwrap_or_else(|| Error::Translation {
+        message: "Max retries exceeded".into(),
+    }))
 }
 
 /// Translate text, automatically chunking if too long
@@ -451,7 +451,7 @@ async fn google_translate(text: &str, source_lang: Language) -> Result<String> {
         } else {
             None
         };
-        return Err(TokenSaverError::from_status_with_retry_after(
+        return Err(Error::from_status_with_retry_after(
             status,
             retry_after_secs,
         ));
@@ -478,7 +478,9 @@ async fn google_translate(text: &str, source_lang: Language) -> Result<String> {
     }
 
     if result.is_empty() {
-        return Err(TokenSaverError::Translation("Empty response".into()));
+        return Err(Error::Translation {
+            message: "Empty response".into(),
+        });
     }
 
     Ok(result)
@@ -523,7 +525,7 @@ pub fn reset_resilience_state() {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::error::{ErrorCategory, TokenSaverError};
+    use crate::error::{Error, ErrorCategory};
     use reqwest::StatusCode;
 
     #[test]
@@ -885,31 +887,31 @@ mod tests {
     fn test_error_category_from_http_status() {
         // Test various HTTP status code classifications
         assert_eq!(
-            TokenSaverError::from_status(StatusCode::UNAUTHORIZED).category(),
+            Error::from_status(StatusCode::UNAUTHORIZED).category(),
             ErrorCategory::Auth
         );
         assert_eq!(
-            TokenSaverError::from_status(StatusCode::FORBIDDEN).category(),
+            Error::from_status(StatusCode::FORBIDDEN).category(),
             ErrorCategory::Auth
         );
         assert_eq!(
-            TokenSaverError::from_status(StatusCode::TOO_MANY_REQUESTS).category(),
+            Error::from_status(StatusCode::TOO_MANY_REQUESTS).category(),
             ErrorCategory::RateLimit
         );
         assert_eq!(
-            TokenSaverError::from_status(StatusCode::PAYMENT_REQUIRED).category(),
+            Error::from_status(StatusCode::PAYMENT_REQUIRED).category(),
             ErrorCategory::Quota
         );
         assert_eq!(
-            TokenSaverError::from_status(StatusCode::BAD_REQUEST).category(),
+            Error::from_status(StatusCode::BAD_REQUEST).category(),
             ErrorCategory::Client
         );
         assert_eq!(
-            TokenSaverError::from_status(StatusCode::INTERNAL_SERVER_ERROR).category(),
+            Error::from_status(StatusCode::INTERNAL_SERVER_ERROR).category(),
             ErrorCategory::Server
         );
         assert_eq!(
-            TokenSaverError::from_status(StatusCode::BAD_GATEWAY).category(),
+            Error::from_status(StatusCode::BAD_GATEWAY).category(),
             ErrorCategory::Server
         );
     }
@@ -917,23 +919,26 @@ mod tests {
     #[test]
     fn test_error_retryable() {
         // Test which errors are retryable
-        assert!(TokenSaverError::RateLimited {
+        assert!(Error::RateLimited {
             retry_after_secs: None
         }
         .is_retryable());
-        assert!(TokenSaverError::RetryableHttp {
+        assert!(Error::RetryableHttp {
             status: StatusCode::SERVICE_UNAVAILABLE
         }
         .is_retryable());
-        assert!(TokenSaverError::Timeout.is_retryable());
-        assert!(TokenSaverError::ConnectionFailed.is_retryable());
+        assert!(Error::Timeout.is_retryable());
+        assert!(Error::ConnectionFailed.is_retryable());
 
-        assert!(!TokenSaverError::Config("bad config".into()).is_retryable());
-        assert!(!TokenSaverError::AuthError {
+        assert!(!Error::Config {
+            message: "bad config".into()
+        }
+        .is_retryable());
+        assert!(!Error::AuthError {
             status: StatusCode::UNAUTHORIZED
         }
         .is_retryable());
-        assert!(!TokenSaverError::QuotaExceeded {
+        assert!(!Error::QuotaExceeded {
             status: StatusCode::PAYMENT_REQUIRED
         }
         .is_retryable());

@@ -41,8 +41,11 @@ impl ErrorCategory {
     }
 }
 
+/// Unified crate-level error type
+///
+/// All errors in the crate should use this enum with `thiserror` for proper error propagation.
 #[derive(Error, Debug)]
-pub enum TokenSaverError {
+pub enum Error {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -67,14 +70,14 @@ pub enum TokenSaverError {
     #[error("Quota exceeded (HTTP {status}). {}", ErrorCategory::Quota.advice())]
     QuotaExceeded { status: StatusCode },
 
-    #[error("Translation failed: {0}")]
-    Translation(String),
+    #[error("Translation failed: {message}")]
+    Translation { message: String },
 
-    #[error("Config error: {}. Fix configuration file syntax or values", .0)]
-    Config(String),
+    #[error("Config error: {message}")]
+    Config { message: String },
 
-    #[error("Cache error: {}. Check disk space and file permissions for cache directory", .0)]
-    Cache(String),
+    #[error("Cache error: {message}")]
+    Cache { message: String },
 
     #[error(
         "Circuit breaker open. Translation service temporarily unavailable. Retry in {0} seconds"
@@ -88,7 +91,7 @@ pub enum TokenSaverError {
     ConnectionFailed,
 }
 
-impl TokenSaverError {
+impl Error {
     /// Classify error into category for handling decisions
     pub fn category(&self) -> ErrorCategory {
         match self {
@@ -107,9 +110,9 @@ impl TokenSaverError {
             Self::RetryableHttp { status } => Self::category_from_status(*status),
             Self::AuthError { .. } => ErrorCategory::Auth,
             Self::QuotaExceeded { .. } => ErrorCategory::Quota,
-            Self::Translation(_) => ErrorCategory::Client,
-            Self::Config(..) => ErrorCategory::Config,
-            Self::Cache(..) => ErrorCategory::Cache,
+            Self::Translation { .. } => ErrorCategory::Client,
+            Self::Config { .. } => ErrorCategory::Config,
+            Self::Cache { .. } => ErrorCategory::Cache,
             Self::CircuitOpen(_) => ErrorCategory::Server,
             Self::Timeout => ErrorCategory::Network,
             Self::ConnectionFailed => ErrorCategory::Network,
@@ -148,7 +151,9 @@ impl TokenSaverError {
             429 => Self::RateLimited { retry_after_secs },
             402 | 451 => Self::QuotaExceeded { status },
             500..=599 => Self::RetryableHttp { status },
-            _ => Self::Translation(format!("HTTP {status}")),
+            _ => Self::Translation {
+                message: format!("HTTP {}", status.as_u16()),
+            },
         }
     }
 
@@ -161,7 +166,12 @@ impl TokenSaverError {
     }
 }
 
-pub type Result<T> = std::result::Result<T, TokenSaverError>;
+/// Crate-level Result type alias for convenience
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// Backward compatibility alias
+#[deprecated(note = "Use Error instead")]
+pub type TokenSaverError = Error;
 
 #[cfg(test)]
 mod tests {
@@ -170,21 +180,21 @@ mod tests {
     #[test]
     fn test_error_categories() {
         assert_eq!(
-            TokenSaverError::RateLimited {
+            Error::RateLimited {
                 retry_after_secs: None
             }
             .category(),
             ErrorCategory::RateLimit
         );
         assert_eq!(
-            TokenSaverError::RetryableHttp {
+            Error::RetryableHttp {
                 status: StatusCode::SERVICE_UNAVAILABLE
             }
             .category(),
             ErrorCategory::Server
         );
         assert_eq!(
-            TokenSaverError::AuthError {
+            Error::AuthError {
                 status: StatusCode::UNAUTHORIZED
             }
             .category(),
@@ -194,66 +204,69 @@ mod tests {
 
     #[test]
     fn test_retryable_errors() {
-        assert!(TokenSaverError::RateLimited {
+        assert!(Error::RateLimited {
             retry_after_secs: None
         }
         .is_retryable());
-        assert!(TokenSaverError::RetryableHttp {
+        assert!(Error::RetryableHttp {
             status: StatusCode::BAD_GATEWAY
         }
         .is_retryable());
-        assert!(TokenSaverError::Timeout.is_retryable());
-        assert!(!TokenSaverError::Config("bad config".into()).is_retryable());
+        assert!(Error::Timeout.is_retryable());
+        assert!(!Error::Config {
+            message: "bad config".into()
+        }
+        .is_retryable());
     }
 
     #[test]
     fn test_from_status() {
         assert!(matches!(
-            TokenSaverError::from_status(StatusCode::UNAUTHORIZED),
-            TokenSaverError::AuthError { .. }
+            Error::from_status(StatusCode::UNAUTHORIZED),
+            Error::AuthError { .. }
         ));
         assert!(matches!(
-            TokenSaverError::from_status(StatusCode::TOO_MANY_REQUESTS),
-            TokenSaverError::RateLimited { .. }
+            Error::from_status(StatusCode::TOO_MANY_REQUESTS),
+            Error::RateLimited { .. }
         ));
         assert!(matches!(
-            TokenSaverError::from_status(StatusCode::BAD_GATEWAY),
-            TokenSaverError::RetryableHttp { .. }
+            Error::from_status(StatusCode::BAD_GATEWAY),
+            Error::RetryableHttp { .. }
         ));
     }
 
     #[test]
     fn test_error_messages_include_advice() {
-        let err = TokenSaverError::RateLimited {
+        let err = Error::RateLimited {
             retry_after_secs: None,
         };
         let msg = err.to_string();
         assert!(msg.contains("Wait and retry"));
 
-        let err = TokenSaverError::RateLimited {
+        let err = Error::RateLimited {
             retry_after_secs: Some(30),
         };
         let msg = err.to_string();
         assert!(msg.contains("retry after 30s"));
 
-        let err = TokenSaverError::CircuitOpen(60);
+        let err = Error::CircuitOpen(60);
         let msg = err.to_string();
         assert!(msg.contains("60 seconds"));
     }
 
     #[test]
     fn test_retry_after_extraction() {
-        let err = TokenSaverError::RateLimited {
+        let err = Error::RateLimited {
             retry_after_secs: Some(60),
         };
         assert_eq!(err.retry_after_secs(), Some(60));
 
-        let err = TokenSaverError::RateLimited {
+        let err = Error::RateLimited {
             retry_after_secs: None,
         };
         assert_eq!(err.retry_after_secs(), None);
 
-        let err = TokenSaverError::Timeout;
+        let err = Error::Timeout;
         assert_eq!(err.retry_after_secs(), None);
     }
 }
