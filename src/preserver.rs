@@ -294,7 +294,13 @@ mod macos_nlp {
                 if utf16_pos == utf16_offset {
                     return Some(byte_idx);
                 }
-                utf16_pos += ch.len_utf16();
+                let len_utf16 = ch.len_utf16();
+                // If the offset is in the middle of this character (e.g. inside a surrogate pair),
+                // return the end of this character (start of next).
+                if utf16_offset > utf16_pos && utf16_offset < utf16_pos + len_utf16 {
+                    return Some(byte_idx + ch.len_utf8());
+                }
+                utf16_pos += len_utf16;
             }
             if utf16_pos == utf16_offset {
                 Some(text.len())
@@ -454,6 +460,140 @@ mod macos_nlp {
             // Should NOT preserve Chinese names (filtered by is_latin_only)
             assert!(!matches.iter().any(|m| m.text.contains('张')));
             assert!(!matches.iter().any(|m| m.text.contains('苹')));
+        }
+
+        // === UTF-16/UTF-8 Conversion Edge Cases (Emoji & Surrogate Pairs) ===
+
+        #[test]
+        fn test_utf16_to_utf8_offset_basic_emoji() {
+            // 😀 = U+1F600, requires UTF-16 surrogate pair (D83D DE00)
+            let text = "Hi😀World";
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 0), Some(0)); // H
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 1), Some(1)); // i
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 2), Some(2)); // 😀 start
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 3), Some(6)); // After 😀 (2 UTF-16 units, 4 UTF-8 bytes)
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 4), Some(6)); // W
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 9), Some(11));
+            // End
+        }
+
+        #[test]
+        fn test_utf16_to_utf8_offset_multi_emoji() {
+            // "🎉🚀" = two emoji with surrogate pairs
+            let text = "🎉🚀";
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 0), Some(0));
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 2), Some(4)); // After 🎉
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 4), Some(8));
+            // End
+        }
+
+        #[test]
+        fn test_utf16_to_utf8_offset_zwj_sequence() {
+            // 👨‍👩‍👧‍👦 = family emoji with ZWJ (multiple code points, multiple surrogate pairs)
+            let text = "👨‍👩‍👧‍👦";
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 0), Some(0));
+            // This is a complex multi-codepoint sequence (4 emojis + 3 ZWJ)
+            // Each emoji is 2 UTF-16 units, each ZWJ is 1 UTF-16 unit
+            // Total: 4*2 + 3 = 11 UTF-16 units
+            // UTF-8: 4*4 + 3*3 = 25 bytes
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 11), Some(25));
+        }
+
+        #[test]
+        fn test_utf16_to_utf8_offset_skin_tone_modifier() {
+            // 👍🏽 = thumbs up with medium skin tone modifier
+            let text = "👍🏽";
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 0), Some(0));
+            // 👍 = U+1F44D (2 UTF-16 units, 4 UTF-8 bytes)
+            // 🏽 = U+1F3FD (2 UTF-16 units, 4 UTF-8 bytes)
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 2), Some(4));
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 4), Some(8));
+        }
+
+        #[test]
+        fn test_utf16_to_utf8_offset_regional_flag() {
+            // 🇺🇸 = US flag (regional indicator symbols)
+            let text = "🇺🇸";
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 0), Some(0));
+            // Each regional indicator is 2 UTF-16 units, 4 UTF-8 bytes.
+            // Offset 1 is inside the first flag (🇺), so it returns the end of 🇺 (4).
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 1), Some(4));
+            // Offset 2 is the start of the second flag (🇸).
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 2), Some(4));
+        }
+
+        #[test]
+        fn test_utf16_to_utf8_offset_variation_selector() {
+            // ❤️ = heart with variation selector-16
+            let text = "❤️";
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 0), Some(0));
+            // ❤ = U+2764 (1 UTF-16 unit, 3 UTF-8 bytes)
+            // ️ = U+FE0F (1 UTF-16 unit, 3 UTF-8 bytes)
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 1), Some(3));
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 2), Some(6));
+        }
+
+        #[test]
+        fn test_utf16_to_utf8_offset_cjk_ideograph() {
+            // 龍 = U+9F8C (a complex CJK character)
+            let text = "龍";
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 0), Some(0));
+            // This is a BMP character, so 1 UTF-16 unit, 3 UTF-8 bytes
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 1), Some(3));
+        }
+
+        #[test]
+        fn test_utf16_to_utf8_offset_cjk_extension() {
+            // 𠮷 = U+20BB7 (CJK Unified Ideograph Extension B, outside BMP)
+            let text = "𠮷";
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 0), Some(0));
+            // This is outside BMP, so 2 UTF-16 units, 4 UTF-8 bytes
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 2), Some(4));
+        }
+
+        #[test]
+        fn test_utf16_to_utf8_offset_complex_mixed() {
+            // "Hi😀안녕🎉" = ASCII + emoji + CJK + emoji
+            let text = "Hi😀안녕🎉";
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 0), Some(0)); // H
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 2), Some(2)); // After "Hi"
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 3), Some(6)); // After "Hi😀" (emoji=4 bytes)
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 5), Some(9)); // After "Hi😀안" (Korean=3 bytes)
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 6), Some(12)); // After "Hi😀안녕"
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 8), Some(16));
+            // End (🎉=4 bytes)
+        }
+
+        #[test]
+        fn test_utf16_to_utf8_offset_invalid_returns_none() {
+            // Test offset beyond string length
+            let text = "Hello";
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 100), None);
+        }
+
+        #[test]
+        fn test_utf16_to_utf8_offset_in_middle_of_surrogate_pair() {
+            // Test offset in the middle of a surrogate pair
+            let text = "Hi😀World";
+            // UTF-16: H i D83D DE00 W o r l d
+            // UTF-8 offsets for UTF-16 positions: 0, 1, 2, 6, 7, 8, 9, 10, 11, 12
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 2), Some(2));
+            assert_eq!(MacOsTermDetector::utf16_to_utf8_offset(text, 3), Some(6));
+        }
+
+        #[test]
+        fn test_mixed_latin_cjk_emoji_preservation() {
+            let text = "The API call uses 안녕하세요 with 🎉 celebration";
+            let config = PreserveConfig::all();
+            let result = extract_and_preserve_with_config(text, &config);
+
+            // Should preserve "API" as EnglishTerm
+            let eng_terms: Vec<_> = result
+                .segments
+                .iter()
+                .filter(|s| s.segment_type == SegmentType::EnglishTerm)
+                .collect();
+            assert!(eng_terms.iter().any(|s| s.original == "API"));
         }
     }
 }
@@ -1142,5 +1282,189 @@ mod tests {
         assert_eq!(term.start, 0);
         // End position should be after "getUserData"
         assert!(term.end > 0);
+    }
+
+    // === Term Detection Overlap Tests ===
+
+    #[test]
+    fn test_adjacent_terms_no_overlap() {
+        let text = "getUserDataAPI 함수";
+        let detector = RegexTermDetector;
+        let matches = detector.detect(text);
+
+        // The regex may match "getUserDataAPI" as a single camelCase identifier
+        // or may split it differently - verify we get at least one valid match
+        assert!(!matches.is_empty(), "Should detect at least one term");
+        // Verify that match covers the identifier portion
+        let has_valid_match = matches
+            .iter()
+            .any(|m| m.text.starts_with("get") || m.text.contains("API"));
+        assert!(has_valid_match, "Should detect identifier terms");
+    }
+
+    #[test]
+    fn test_nested_term_patterns() {
+        let text = "parseXMLFileData 함수";
+        let detector = RegexTermDetector;
+        let matches = detector.detect(text);
+
+        // Should detect the full identifier "parseXMLFileData"
+        // Not multiple overlapping matches
+        assert!(matches.iter().any(|m| m.text == "parseXMLFileData"));
+    }
+
+    #[test]
+    fn test_screaming_case_prefix_in_camel() {
+        let text = "XMLParserClass 클래스";
+        let detector = RegexTermDetector;
+        let matches = detector.detect(text);
+
+        // Should detect "XMLParserClass" as PascalCase
+        assert!(matches.iter().any(|m| m.text == "XMLParserClass"));
+    }
+
+    #[test]
+    fn test_multiple_terms_in_sequence() {
+        let text = "getUserDataFromAPIWithXMLParser 함수";
+        let detector = RegexTermDetector;
+        let matches = detector.detect(text);
+
+        // Should detect the full camelCase identifier
+        assert!(matches
+            .iter()
+            .any(|m| m.text == "getUserDataFromAPIWithXMLParser"));
+    }
+
+    #[test]
+    fn test_acronym_boundary_detection() {
+        let text = "URLParserHTTPClient 클래스";
+        let detector = RegexTermDetector;
+        let matches = detector.detect(text);
+
+        // Should detect as single PascalCase identifier
+        assert!(matches.iter().any(|m| m.text == "URLParserHTTPClient"));
+    }
+
+    #[test]
+    fn test_underscore_acronym_boundary() {
+        let text = "API_KEY_USER_ID 변수";
+        let detector = RegexTermDetector;
+        let matches = detector.detect(text);
+
+        // Should detect as single SCREAMING_SNAKE_CASE
+        assert!(matches.iter().any(|m| m.text == "API_KEY_USER_ID"));
+    }
+
+    // === Emoji and Complex Character Preservation Tests ===
+
+    #[test]
+    fn test_emoji_with_code_preservation() {
+        let text = "Use `console.log('🎉')` for celebration";
+        let result = extract_and_preserve(text);
+
+        // Should preserve the inline code block
+        let inline_codes: Vec<_> = result
+            .segments
+            .iter()
+            .filter(|s| s.segment_type == SegmentType::InlineCode)
+            .collect();
+        assert_eq!(inline_codes.len(), 1);
+        assert!(inline_codes[0].original.contains("🎉"));
+    }
+
+    #[test]
+    fn test_emoji_in_url() {
+        let text = "Visit https://example.com/path/🎉test for more";
+        let result = extract_and_preserve(text);
+
+        // Should preserve URL including emoji
+        let urls: Vec<_> = result
+            .segments
+            .iter()
+            .filter(|s| s.segment_type == SegmentType::Url)
+            .collect();
+        assert_eq!(urls.len(), 1);
+        assert!(urls[0].original.contains("🎉"));
+    }
+
+    #[test]
+    fn test_zwj_sequence_preservation() {
+        // Test that complex emoji sequences are handled
+        let text = "Family: 👨‍👩‍👧‍👦 is nice";
+        let result = extract_and_preserve(text);
+
+        // Should not crash or corrupt emoji sequence
+        let restored = restore_preserved(&result.text, &result.segments);
+        assert!(restored.contains("👨‍👩‍👧‍👦"));
+    }
+
+    #[test]
+    fn test_multiple_complex_emoji_preservation() {
+        let text = "Emojis: 🎉🚀❤️👍🏽🇺🇸 are fun";
+        let result = extract_and_preserve(text);
+        let restored = restore_preserved(&result.text, &result.segments);
+
+        // All emoji should be preserved through roundtrip
+        assert!(restored.contains("🎉"));
+        assert!(restored.contains("🚀"));
+        assert!(restored.contains("❤️"));
+        assert!(restored.contains("👍🏽"));
+        assert!(restored.contains("🇺🇸"));
+    }
+
+    #[test]
+    fn test_emoji_variation_selectors_preservation() {
+        let text = "Hearts: ❤ ❤️ are different";
+        let result = extract_and_preserve(text);
+        let restored = restore_preserved(&result.text, &result.segments);
+
+        // Both forms should be preserved
+        assert!(restored.contains("❤"));
+        assert!(restored.contains("❤️"));
+    }
+
+    #[test]
+    fn test_korean_japanese_chinese_mixed() {
+        let text = "Korean: 안녕 Japanese: こんにちは Chinese: 你好";
+        let result = extract_and_preserve(text);
+        let restored = restore_preserved(&result.text, &result.segments);
+
+        // All scripts should be preserved
+        assert!(restored.contains("안녕"));
+        assert!(restored.contains("こんにちは"));
+        assert!(restored.contains("你好"));
+    }
+
+    #[test]
+    fn test_beyond_bmp_cjk_with_emoji() {
+        // 𠮷 = U+20BB7 (CJK Extension B)
+        let text = "Use 𠮷 with 🎉 emoji";
+        let result = extract_and_preserve(text);
+        let restored = restore_preserved(&result.text, &result.segments);
+
+        // Beyond BMP CJK character should be preserved
+        assert!(restored.contains("𠮷"));
+        assert!(restored.contains("🎉"));
+    }
+
+    #[test]
+    fn test_preserver_with_combining_diacritics() {
+        // café with combining acute accent
+        let text = "Use café for coffee";
+        let result = extract_and_preserve(text);
+        let restored = restore_preserved(&result.text, &result.segments);
+
+        // Combining characters should be preserved
+        assert!(restored.contains("café"));
+    }
+
+    #[test]
+    fn test_preserver_with_zero_width_joiner_in_text() {
+        let text = "Check: 👨‍🚀 is astronaut";
+        let result = extract_and_preserve(text);
+        let restored = restore_preserved(&result.text, &result.segments);
+
+        // ZWJ sequences should be preserved intact
+        assert!(restored.contains("👨‍🚀"));
     }
 }
