@@ -470,16 +470,36 @@ pub fn get_term_detector(use_nlp: bool) -> Box<dyn TermDetector> {
 }
 
 /// Configuration for preservation behavior
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PreserveConfig {
     /// Enable [[...]] wiki-style markers
+    #[serde(default = "default_true")]
     pub wiki_markers: bool,
     /// Enable ==...== highlight-style markers
+    #[serde(default = "default_true")]
     pub highlight_markers: bool,
     /// Enable auto-detection of English technical terms in CJK text
+    #[serde(default = "default_true")]
     pub english_terms: bool,
     /// Use macOS NLP for term detection (macOS only, falls back to regex)
+    #[serde(default = "default_true")]
     pub use_nlp: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for PreserveConfig {
+    fn default() -> Self {
+        Self {
+            wiki_markers: true,
+            highlight_markers: true,
+            english_terms: true,
+            use_nlp: true,
+        }
+    }
 }
 
 impl PreserveConfig {
@@ -495,7 +515,12 @@ impl PreserveConfig {
 
     /// Config with only basic preservation (code, URLs, paths)
     pub fn basic() -> Self {
-        Self::default()
+        Self {
+            wiki_markers: false,
+            highlight_markers: false,
+            english_terms: false,
+            use_nlp: false,
+        }
     }
 }
 

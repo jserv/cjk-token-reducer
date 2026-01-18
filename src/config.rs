@@ -1,5 +1,10 @@
+use crate::preserver::PreserveConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+fn default_true() -> bool {
+    true
+}
 
 const CONFIG_FILENAME: &str = ".cjk-token.json";
 
@@ -87,53 +92,6 @@ impl Default for ResilienceConfig {
             circuit_breaker_threshold: DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
             circuit_breaker_reset_secs: DEFAULT_CIRCUIT_BREAKER_RESET_SECS,
             fallback_to_passthrough: true,
-        }
-    }
-}
-
-/// Preservation configuration for no-translate markers and term detection
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PreserveConfig {
-    /// Enable [[...]] wiki-style no-translate markers (default: true)
-    #[serde(default = "default_true")]
-    pub wiki_markers: bool,
-
-    /// Enable ==...== highlight-style no-translate markers (default: true)
-    #[serde(default = "default_true")]
-    pub highlight_markers: bool,
-
-    /// Auto-preserve English technical terms like camelCase, SCREAMING_CASE (default: true)
-    #[serde(default = "default_true")]
-    pub english_terms: bool,
-
-    /// Use macOS NLP for term detection (macOS only, falls back to regex; default: true)
-    #[serde(default = "default_true")]
-    pub use_nlp: bool,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-impl Default for PreserveConfig {
-    fn default() -> Self {
-        Self {
-            wiki_markers: true,
-            highlight_markers: true,
-            english_terms: true,
-            use_nlp: true,
-        }
-    }
-}
-
-impl From<&PreserveConfig> for crate::preserver::PreserveConfig {
-    fn from(config: &PreserveConfig) -> Self {
-        crate::preserver::PreserveConfig {
-            wiki_markers: config.wiki_markers,
-            highlight_markers: config.highlight_markers,
-            english_terms: config.english_terms,
-            use_nlp: config.use_nlp,
         }
     }
 }
@@ -334,19 +292,19 @@ mod tests {
     }
 
     #[test]
-    fn test_preserve_config_to_preserver_config() {
-        // Test the From conversion including use_nlp field
-        let config = PreserveConfig {
-            wiki_markers: false,
-            highlight_markers: true,
-            english_terms: false,
-            use_nlp: false,
-        };
-        let preserver_config: crate::preserver::PreserveConfig = (&config).into();
-        assert!(!preserver_config.wiki_markers);
-        assert!(preserver_config.highlight_markers);
-        assert!(!preserver_config.english_terms);
-        assert!(!preserver_config.use_nlp);
+    fn test_preserve_config_builder_methods() {
+        // Test the builder methods for PreserveConfig
+        let all_config = PreserveConfig::all();
+        assert!(all_config.wiki_markers);
+        assert!(all_config.highlight_markers);
+        assert!(all_config.english_terms);
+        assert!(all_config.use_nlp);
+
+        let basic_config = PreserveConfig::basic();
+        assert!(!basic_config.wiki_markers);
+        assert!(!basic_config.highlight_markers);
+        assert!(!basic_config.english_terms);
+        assert!(!basic_config.use_nlp);
     }
 
     #[test]

@@ -33,6 +33,37 @@ struct CharCounts {
     total: usize,
 }
 
+/// Check if character is CJK (Chinese/Japanese/Korean)
+pub fn is_cjk_char(ch: &char) -> bool {
+    matches!(ch,
+        // CJK Unified Ideographs (main block + extensions)
+        '\u{4E00}'..='\u{9FFF}' |  // CJK Unified Ideographs
+        '\u{3400}'..='\u{4DBF}' |  // CJK Extension A
+        '\u{20000}'..='\u{2A6DF}'| // CJK Extension B
+        '\u{2A700}'..='\u{2B73F}'| // CJK Extension C
+        '\u{2B740}'..='\u{2B81F}'| // CJK Extension D
+        '\u{2B820}'..='\u{2CEAF}'| // CJK Extension E
+        '\u{2CEB0}'..='\u{2EBEF}'| // CJK Extension F
+        '\u{30000}'..='\u{3134F}'| // CJK Extension G
+        '\u{F900}'..='\u{FAFF}' |  // CJK Compatibility Ideographs
+        // Japanese
+        '\u{3040}'..='\u{309F}' |  // Hiragana
+        '\u{30A0}'..='\u{30FF}' |  // Katakana
+        '\u{31F0}'..='\u{31FF}' |  // Katakana Phonetic Extensions
+        // Korean
+        '\u{AC00}'..='\u{D7AF}' |  // Hangul Syllables
+        '\u{1100}'..='\u{11FF}' |  // Hangul Jamo
+        '\u{3130}'..='\u{318F}' |  // Hangul Compatibility Jamo
+        '\u{A960}'..='\u{A97F}' |  // Hangul Jamo Extended-A
+        '\u{D7B0}'..='\u{D7FF}' |  // Hangul Jamo Extended-B
+        // CJK Symbols and Punctuation
+        '\u{3000}'..='\u{303F}' |  // CJK Symbols and Punctuation
+        '\u{3100}'..='\u{312F}' |  // Bopomofo
+        '\u{31A0}'..='\u{31BF}' |  // Bopomofo Extended
+        '\u{FF00}'..='\u{FFEF}'    // Halfwidth and Fullwidth Forms
+    )
+}
+
 /// Detect the dominant CJK language in text
 pub fn detect_language(text: &str) -> DetectionResult {
     let mut counts = CharCounts::default();

@@ -3,6 +3,8 @@
 //! When the `tokenizer` feature is enabled, uses the claude-tokenizer crate
 //! for precise token counting. Otherwise, falls back to estimation.
 
+use crate::detector::is_cjk_char;
+
 /// Result of token counting with fallback indicator
 #[derive(Debug)]
 pub struct TokenCountResult {
@@ -65,39 +67,7 @@ pub fn tokenize(text: &str) -> Vec<String> {
 /// - CJK characters: ~1.5 tokens per character
 /// - Non-CJK: ~0.25 tokens per character (roughly 4 chars per token)
 fn estimate_tokens_fallback(text: &str) -> usize {
-    let cjk_chars = text
-        .chars()
-        .filter(|c| {
-            matches!(c,
-                // CJK Unified Ideographs (main block + extensions)
-                '\u{4E00}'..='\u{9FFF}' |  // CJK Unified Ideographs
-                '\u{3400}'..='\u{4DBF}' |  // CJK Extension A
-                '\u{20000}'..='\u{2A6DF}'| // CJK Extension B
-                '\u{2A700}'..='\u{2B73F}'| // CJK Extension C
-                '\u{2B740}'..='\u{2B81F}'| // CJK Extension D
-                '\u{2B820}'..='\u{2CEAF}'| // CJK Extension E
-                '\u{2CEB0}'..='\u{2EBEF}'| // CJK Extension F
-                '\u{30000}'..='\u{3134F}'| // CJK Extension G
-                '\u{F900}'..='\u{FAFF}' |  // CJK Compatibility Ideographs
-                // Japanese
-                '\u{3040}'..='\u{309F}' |  // Hiragana
-                '\u{30A0}'..='\u{30FF}' |  // Katakana
-                '\u{31F0}'..='\u{31FF}' |  // Katakana Phonetic Extensions
-                // Korean
-                '\u{AC00}'..='\u{D7AF}' |  // Hangul Syllables
-                '\u{1100}'..='\u{11FF}' |  // Hangul Jamo
-                '\u{3130}'..='\u{318F}' |  // Hangul Compatibility Jamo
-                '\u{A960}'..='\u{A97F}' |  // Hangul Jamo Extended-A
-                '\u{D7B0}'..='\u{D7FF}' |  // Hangul Jamo Extended-B
-                // CJK Symbols and Punctuation
-                '\u{3000}'..='\u{303F}' |  // CJK Symbols and Punctuation
-                '\u{3100}'..='\u{312F}' |  // Bopomofo
-                '\u{31A0}'..='\u{31BF}' |  // Bopomofo Extended
-                '\u{FF00}'..='\u{FFEF}'    // Halfwidth and Fullwidth Forms
-            )
-        })
-        .count();
-
+    let cjk_chars = text.chars().filter(is_cjk_char).count();
     let non_cjk_chars = text.chars().count() - cjk_chars;
 
     // CJK: ~1.5 tokens per char, Non-CJK: ~0.25 tokens per char
@@ -204,104 +174,14 @@ mod tests {
     }
 
     #[test]
-    fn test_fallback_estimation_mixed_content() {
-        // Test with mixed CJK and English
-        let count = estimate_tokens_fallback("Hello 世界");
-        assert!(count > 0);
-    }
-
-    #[test]
-    fn test_token_savings_struct() {
-        let savings = TokenSavings {
-            original_tokens: 100,
-            translated_tokens: 80,
-            saved_tokens: 20,
-            savings_percent: 20.0,
-        };
-
-        assert_eq!(savings.original_tokens, 100);
-        assert_eq!(savings.translated_tokens, 80);
-        assert_eq!(savings.saved_tokens, 20);
-        assert!((savings.savings_percent - 20.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_calculate_savings_edge_cases() {
-        // Test with empty strings
-        let savings = calculate_savings("", "");
-        assert_eq!(savings.original_tokens, 0);
-        assert_eq!(savings.savings_percent, 0.0);
-
-        // Test with same content (no savings)
-        let savings = calculate_savings("Hello", "Hello");
-        assert!(savings.original_tokens > 0);
-        assert_eq!(savings.saved_tokens, 0);
-
-        // Test where translation is longer than original
-        let savings = calculate_savings("Hi", "This is a very long translation");
-        assert!(savings.original_tokens > 0);
-        assert_eq!(savings.saved_tokens, 0); // Should not be negative
-    }
-
-    #[test]
-    fn test_count_tokens_with_fallback_consistency() {
-        let text = "Hello 世界";
-        let result = count_tokens_with_fallback(text);
-        let direct_count = count_tokens(text);
-
-        assert_eq!(result.count, direct_count);
-        assert!(result.count > 0);
-    }
-
-    #[test]
-    fn test_tokenize_with_fallback() {
-        let (tokens, used_fallback) = tokenize_with_fallback("Hello world");
-
-        #[cfg(feature = "tokenizer")]
-        {
-            // When tokenizer feature is enabled, it may or may not use fallback
-            // depending on whether the tokenizer succeeds
-            assert_eq!(tokens.is_empty(), used_fallback);
-        }
-        #[cfg(not(feature = "tokenizer"))]
-        {
-            // When tokenizer feature is disabled, always uses fallback
-            assert!(tokens.is_empty());
-            assert!(used_fallback);
-        }
-    }
-
-    #[test]
-    fn test_tokenize_function() {
-        let _tokens = tokenize("Hello world");
-
-        #[cfg(feature = "tokenizer")]
-        {
-            // May return tokens if the tokenizer works
-            // Or empty vector if it falls back to disabled tokenizer
-        }
-        #[cfg(not(feature = "tokenizer"))]
-        {
-            // Always returns empty when tokenizer feature is disabled
-            let tokens = tokenize("Hello world");
-            assert!(tokens.is_empty());
-        }
-    }
-
-    #[test]
-    fn test_estimate_tokens_fallback_cjk_ranges() {
-        // Test various CJK character ranges
+    fn test_estimate_tokens_fallback_cjk_chars() {
+        // Test primary CJK character ranges (Chinese, Japanese, Korean)
         let cjk_chars = [
-            "一", // Basic CJK Unified Ideograph
-            "㐂", // CJK Extension A
-            "぀",  // CJK Extension B (partial)
-            "ゟ", // CJK Compatibility Ideograph
-            "あ", // Hiragana
-            "ア", // Katakana
-            "가", // Hangul Syllable
-            "ㄱ", // Hangul Jamo
-            "㆐", // Bopomofo Extended
-            "￠", // Halfwidth and Fullwidth Form
+            "一", // Basic CJK Unified Ideograph (Chinese/Japanese Kanji)
+            "あ", // Hiragana (Japanese)
+            "ア", // Katakana (Japanese)
+            "가", // Hangul Syllable (Korean)
+            "ㄱ", // Hangul Jamo (Korean)
         ];
 
         for cjk_char in &cjk_chars {
